@@ -61,6 +61,10 @@ int  loaderFlashCount = 0;    // number of on→off cycles completed
 bool loaderFlashOn    = false;
 unsigned long loaderFadeStart = 0;
 
+int sealPos   = 0;    // front LED of the 2-LED sliding window
+int sealStep  = 0;    // 0 = initial single LED; 1+ = sliding pair
+int sealSpeed = 100;  // ms per step
+
 // ── Trigger State ─────────────────────────────────────────
 CRGB          triggerReturnColor = CRGB(74, 140, 58); // color to restore after trigger expiry
 
@@ -189,7 +193,7 @@ function syncRGB(i){const{r,g,b}=hexToRgb(document.getElementById('col'+i).value
 function syncPicker(i){document.getElementById('col'+i).value=rgbToHex(+document.querySelector('[name=r'+i+']').value,+document.querySelector('[name=g'+i+']').value,+document.querySelector('[name=b'+i+']').value);}
 function eff(list,sel){return list.map(e=>'<option value="'+e+'"'+(e===sel?' selected':'')+'>'+e+'</option>').join('');}
 function buildRow(i,p){
-  const effs=['solid','gaslight','chase','rainbow','loader','off_effect'];
+  const effs=['solid','gaslight','chase','rainbow','loader','summon2','off_effect'];
   const hex=rgbToHex(p.r||255,p.g||255,p.b||255);
   return'<div class="phrase-row"><span class="row-num">'+( i+1)+'</span><div class="phrase-inner">'+
     '<input type="text" name="phrase'+i+'" placeholder="e.g. The Abbey" value="'+(p.phrase||'')+'">'+
@@ -331,7 +335,7 @@ for(let i=0;i<NUM_LEDS;i++){
   circles.push(c);ringDotsP.appendChild(c);
 }
 const EFFECT_NAMES={solid:'Steady Glow',pulse:'Heartbeat',rainbow:'Prismatic Rift',
-  chase:'Elder Sign Chase',sparkle:'Spectral Flicker',gaslight:'Gaslight Vigil',loader:'Summoning Seal',off_effect:'Extinguished'};
+  chase:'Elder Sign Chase',sparkle:'Spectral Flicker',gaslight:'Gaslight Vigil',loader:'Summoning Seal',summon2:'Summoning Seal II',off_effect:'Extinguished'};
 let state={power:true,color:'#4a8c3a',brightness:180,effect:'solid',
   chaseSpokes:8,chaseSpeed:60,loaderSpeed:80,loaderFlashMs:200,loaderFadeSec:21,
   gasCycle:1,gasTotalCycles:7,gasMinBrightness:190,gasMaxBrightness:255,
@@ -345,6 +349,7 @@ const ES={
   chase:   {pos:0,lastTs:0,revStep:0,litCount:1},
   sparkle: {lastTs:0,levels:new Array(NUM_LEDS).fill(0)},
   loader:  {base:1,sweep:1,lastTs:0,phase:0,flashCount:0,flashOn:false,fadeStart:0},
+  summon2: {pos:0,step:0,lastTs:0},
   gaslight:{phase:0,txActive:false,txStart:0,txDepth:0,txCheck:0},
 };
 const ES_RESET={
@@ -353,6 +358,7 @@ const ES_RESET={
   chase:   e=>{e.pos=0;e.lastTs=0;e.revStep=0;e.litCount=1;},
   sparkle: e=>{e.lastTs=0;e.levels.fill(0);},
   loader:  e=>{e.base=1;e.sweep=1;e.lastTs=0;e.phase=0;e.flashCount=0;e.flashOn=false;e.fadeStart=0;},
+  summon2: e=>{e.pos=0;e.step=0;e.lastTs=0;},
   gaslight:e=>{e.phase=0;e.txActive=false;},
 };
 const EFFECT_RENDERERS={
@@ -392,6 +398,13 @@ const EFFECT_RENDERERS={
       const g=Math.round(Math.min(1,(ts-e.fadeStart)/(fsec*1000))*255);
       circles.forEach(c=>c.setAttribute('fill',`rgb(0,${g},0)`));
     }
+  },
+  summon2:(ts,dt,cr,cg,cb,st)=>{
+    const e=ES.summon2,spd=100;
+    circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
+    if(ts-e.lastTs>spd){e.lastTs=ts;if(e.step===0){e.step=1;}else{e.pos=(e.pos+1)%NUM_LEDS;}}
+    if(e.step===0){circles[0].setAttribute('fill',`rgb(${cr},${cg},${cb})`);}
+    else{circles[e.pos].setAttribute('fill',`rgb(${cr},${cg},${cb})`);circles[(e.pos+1)%NUM_LEDS].setAttribute('fill',`rgb(${cr},${cg},${cb})`); }
   },
   gaslight:(ts,dt,cr,cg,cb,st)=>{
     const e=ES.gaslight;e.phase+=Math.PI*2*1.5*dt;
@@ -1156,6 +1169,9 @@ input[type="range"]::-webkit-slider-thumb:hover {
       <button class="effect-btn" data-effect="loader">
         <span class="code">PROTO-07</span>Summoning Seal
       </button>
+      <button class="effect-btn" data-effect="summon2">
+        <span class="code">PROTO-08</span>Summoning Seal II
+      </button>
       <button class="effect-btn" data-effect="gaslight">
         <span class="code">PROTO-06</span>Gaslight Vigil
       </button>
@@ -1384,6 +1400,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     chase:    { pos: 0, lastTs: 0, revStep: 0, litCount: 1 },
     sparkle:  { lastTs: 0, levels: new Array(NUM_LEDS).fill(0) },
     loader:   { base: 1, sweep: 1, lastTs: 0, phase: 0, flashCount: 0, flashOn: false, fadeStart: 0 },
+    summon2:  { pos: 0, step: 0, lastTs: 0 },
     gaslight: { phase: 0, txActive: false, txStart: 0, txDepth: 0, txCheck: 0 },
   };
   const ES_RESET = {
@@ -1392,6 +1409,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     chase:    e => { e.pos = 0; e.lastTs = 0; e.revStep = 0; e.litCount = 1; },
     sparkle:  e => { e.lastTs = 0; e.levels.fill(0); },
     loader:   e => { e.base = 1; e.sweep = 1; e.lastTs = 0; e.phase = 0; e.flashCount = 0; e.flashOn = false; e.fadeStart = 0; },
+    summon2:  e => { e.pos = 0; e.step = 0; e.lastTs = 0; },
     gaslight: e => { e.phase = 0; e.txActive = false; },
   };
   const EFFECT_RENDERERS = {
@@ -1437,6 +1455,20 @@ input[type="range"]::-webkit-slider-thumb:hover {
       } else {
         const g = Math.round(Math.min(1, (ts - e.fadeStart) / (fsec * 1000)) * 255);
         circles.forEach(c => c.setAttribute('fill', `rgb(0,${g},0)`));
+      }
+    },
+    summon2: (ts, dt, cr, cg, cb) => {
+      const e = ES.summon2, spd = 100;
+      circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
+      if (ts - e.lastTs > spd) {
+        e.lastTs = ts;
+        if (e.step === 0) { e.step = 1; } else { e.pos = (e.pos + 1) % NUM_LEDS; }
+      }
+      if (e.step === 0) {
+        circles[0].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+      } else {
+        circles[e.pos].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+        circles[(e.pos + 1) % NUM_LEDS].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
       }
     },
     gaslight: (ts, dt, cr, cg, cb) => {
@@ -2171,6 +2203,28 @@ void renderGaslight() { runGaslightEffect(); }
 void activateOff() { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
 void renderOff()   { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
 
+// ── Summoning Seal II — 2-LED sliding window ──────────────
+void activateSummon2() {
+  sealPos = 0; sealStep = 0;
+  lastUpdate = 0;
+}
+void renderSummon2() {
+  unsigned long now = millis();
+  if (now - lastUpdate < (unsigned long)sealSpeed) return;
+  lastUpdate = now;
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  if (sealStep == 0) {
+    leds[0] = currentColor;
+    sealStep = 1;
+  } else {
+    leds[sealPos] = currentColor;
+    leds[(sealPos + 1) % NUM_LEDS] = currentColor;
+    sealPos = (sealPos + 1) % NUM_LEDS;
+  }
+  FastLED.setBrightness(brightness);
+  FastLED.show();
+}
+
 // ── Effect registry ───────────────────────────────────────
 const EffectDef EFFECTS[] = {
   { "solid",      activateSolid,    renderSolid    },
@@ -2178,9 +2232,10 @@ const EffectDef EFFECTS[] = {
   { "rainbow",    activateRainbow,  renderRainbow  },
   { "chase",      activateChase,    renderChase    },
   { "sparkle",    activateSparkle,  renderSparkle  },
-  { "loader",     activateLoader,   renderLoader   },
-  { "gaslight",   activateGaslight, renderGaslight },
-  { "off_effect", activateOff,      renderOff      },
+  { "loader",     activateLoader,    renderLoader    },
+  { "summon2",    activateSummon2,   renderSummon2   },
+  { "gaslight",   activateGaslight,  renderGaslight  },
+  { "off_effect", activateOff,       renderOff       },
 };
 const int NUM_EFFECTS = (int)(sizeof(EFFECTS) / sizeof(EFFECTS[0]));
 
