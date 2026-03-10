@@ -1844,6 +1844,14 @@ String runInference(int16_t* buf, size_t len) {
   return "";  // no detection until EI library is added
 }
 
+// ── Effect registry forward declarations ─────────────────
+struct EffectDef {
+  const char* id;
+  void (*onActivate)();
+  void (*onRender)();
+};
+const EffectDef* findEffect(const String& id);
+
 // ── Phrase trigger ────────────────────────────────────────
 void activateEffect(const String& id, CRGB colour) {
   currentColor  = colour;
@@ -2164,12 +2172,6 @@ void activateOff() { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
 void renderOff()   { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
 
 // ── Effect registry ───────────────────────────────────────
-struct EffectDef {
-  const char* id;
-  void (*onActivate)();
-  void (*onRender)();
-};
-
 const EffectDef EFFECTS[] = {
   { "solid",      activateSolid,    renderSolid    },
   { "pulse",      activatePulse,    renderPulse    },
