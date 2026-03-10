@@ -44,8 +44,12 @@ uint8_t brightness    = 180;
 String  currentEffect = "solid";
 
 unsigned long lastUpdate = 0;
-int chasePos = 0;
-int rainbowHue = 0;
+int chasePos      = 0;
+int chaseRevStep  = 0;   // steps taken in the current revolution
+int chaseLitCount = 1;   // spokes currently lit during build-up
+int chaseSpokes   = 8;   // target number of evenly-spaced spokes
+int chaseSpeed    = 60;  // ms per step
+int rainbowHue    = 0;
 
 // ── Gaslight Parameters ───────────────────────────────────
 int gasMaxBrightness     = 255;
@@ -968,6 +972,54 @@ input[type="range"]::-webkit-slider-thumb:hover {
   .gas-row label{ font-size: clamp(.68rem, 1.2vw, .78rem); }
   .status-text  { font-size: clamp(.56rem, 1vw,  .65rem);  }
 }
+
+/* Explainer hints */
+.field-hint {
+  font-size: .5rem;
+  letter-spacing: .08em;
+  color: rgba(26,18,8,.48);
+  font-style: italic;
+  margin: -6px 0 10px;
+  line-height: 1.55;
+}
+.gas-hint {
+  display: block;
+  font-size: .44rem;
+  letter-spacing: .06em;
+  color: rgba(26,18,8,.38);
+  font-style: italic;
+  font-weight: normal;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+/* Chase parameter section */
+.chase-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+.chase-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chase-row label {
+  font-size: .64rem;
+  letter-spacing: .06em;
+  color: var(--ink-faded);
+  text-transform: uppercase;
+}
+.chase-row input[type="number"] {
+  width: 100%;
+  background: rgba(26,18,8,0.06);
+  border: 1px solid rgba(26,18,8,0.28);
+  color: var(--ink);
+  padding: 6px 8px;
+  font-family: 'Courier Prime', monospace;
+  font-size: .78rem;
+}
 </style>
 </head>
 <body>
@@ -1021,6 +1073,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     <hr class="divider">
 
     <div class="field-label">Apparatus Power — Circuit Alpha</div>
+    <p class="field-hint">Enables or disables all LED output. Ring holds its last colour when dormant.</p>
     <div class="power-row">
       <div class="power-status">
         Ritual Illumination
@@ -1035,6 +1088,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     <hr class="divider">
 
     <div class="field-label">Spectral Frequency — Chromatic Band</div>
+    <p class="field-hint">Select a spectral preset or dial in a custom hue. Affects all colour-based effects.</p>
     <div class="colour-swatches" id="swatches"></div>
     <div class="colour-row">
       <input type="color" id="colorPicker" value="#4a8c3a">
@@ -1044,6 +1098,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     <hr class="divider">
 
     <div class="field-label">Intensity Modulator — Candle Power</div>
+    <p class="field-hint">Global brightness ceiling applied to every effect. 0 = off, 255 = maximum output.</p>
     <div class="bright-row">
       <input type="range" id="brightness" min="0" max="255" value="180">
       <span class="bright-val" id="brightnessVal">180</span>
@@ -1053,6 +1108,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     <div class="dossier-col">
 
     <div class="field-label">Manifestation Protocol — Select Ritual</div>
+    <p class="field-hint">Choose the active light behaviour. Each ritual uses the selected colour and brightness above.</p>
     <div class="effects-grid">
       <button class="effect-btn active" data-effect="solid">
         <span class="code">PROTO-01</span>Steady Glow
@@ -1079,59 +1135,75 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
     <hr class="divider">
 
+    <div class="field-label">Elder Sign Chase — Ritual Parameters</div>
+    <p class="field-hint">Controls the build-up sequence and steady-state formation. The ring builds from 1 spoke to the target count, adding one per revolution, then holds the even formation.</p>
+    <div class="chase-grid">
+      <div class="chase-row">
+        <label for="chaseSpokes">Spoke Count<span class="gas-hint">LEDs in steady formation (1–24)</span></label>
+        <input type="number" id="chaseSpokes" min="1" max="24" value="8">
+      </div>
+      <div class="chase-row">
+        <label for="chaseSpeed">Step Speed<span class="gas-hint">Milliseconds per step (10–500)</span></label>
+        <input type="number" id="chaseSpeed" min="10" max="500" value="60">
+      </div>
+    </div>
+
+    <hr class="divider">
+
     <div class="field-label">Gaslight Parameters — Ritual Timing Matrix</div>
+    <p class="field-hint">Tune the Gaslight Vigil behaviour. The ritual runs through Normal cycles, then fades during Descent cycles, creating a slow, imperceptible dimming effect.</p>
 
     <div class="gas-grid">
       <div class="gas-row">
-        <label for="gasTargetSeconds">Cycle Duration</label>
+        <label for="gasTargetSeconds">Cycle Duration<span class="gas-hint">Seconds each brightness cycle lasts</span></label>
         <input type="number" id="gasTargetSeconds" min="1" max="99999" value="777">
         <span class="gas-unit">sec</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasTotalCycles">Total Cycles</label>
+        <label for="gasTotalCycles">Total Cycles<span class="gas-hint">Total number of cycles before the vigil ends</span></label>
         <input type="number" id="gasTotalCycles" min="1" max="99" value="7">
         <span class="gas-unit">count</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasDescentCycles">Descent Cycles</label>
+        <label for="gasDescentCycles">Descent Cycles<span class="gas-hint">Final N cycles that gradually dim to Descent range</span></label>
         <input type="number" id="gasDescentCycles" min="1" max="99" value="2">
         <span class="gas-unit">count</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasMinBrightness">Normal Min</label>
+        <label for="gasMinBrightness">Normal Min<span class="gas-hint">Lowest brightness during normal cycles (must be &lt; Normal Max)</span></label>
         <input type="number" id="gasMinBrightness" min="0" max="255" value="190">
         <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasMaxBrightness">Normal Max</label>
+        <label for="gasMaxBrightness">Normal Max<span class="gas-hint">Peak brightness during normal cycles</span></label>
         <input type="number" id="gasMaxBrightness" min="0" max="255" value="255">
         <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasDeepBrightnessMin">Descent Min</label>
+        <label for="gasDeepBrightnessMin">Descent Min<span class="gas-hint">Lowest brightness reached during descent (must be &lt; Descent Max)</span></label>
         <input type="number" id="gasDeepBrightnessMin" min="0" max="255" value="5">
         <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasDeepBrightnessMax">Descent Max</label>
+        <label for="gasDeepBrightnessMax">Descent Max<span class="gas-hint">Peak brightness during the dimmed descent phase</span></label>
         <input type="number" id="gasDeepBrightnessMax" min="0" max="255" value="25">
         <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasVariation">Per-LED Variation</label>
+        <label for="gasVariation">Per-LED Variation<span class="gas-hint">Random flicker spread between individual LEDs. 0 = uniform.</span></label>
         <input type="number" id="gasVariation" min="0" max="50" value="15">
         <span class="gas-unit">0–50</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasWarnProbability">Warning Chance</label>
+        <label for="gasWarnProbability">Warning Chance<span class="gas-hint">Probability per 100 ms of a brief flicker transient</span></label>
         <input type="number" id="gasWarnProbability" min="0" max="100" value="10">
         <span class="gas-unit">%/100ms</span>
       </div>
@@ -1234,6 +1306,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
     color: '#4a8c3a',
     brightness: 180,
     effect: 'solid',
+    chaseSpokes: 8,
+    chaseSpeed: 60,
     gasTargetSeconds: 777,
     gasTotalCycles: 7,
     gasDescentCycles: 2,
@@ -1251,14 +1325,14 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
   // ── Animation State ──────────────────────────────────────
   let animLastTs = 0, pulsePhase = 0, rainbowHueJs = 0;
-  let chasePos = 0, chaseLastTs = 0;
+  let chasePos = 0, chaseLastTs = 0, chaseRevStep = 0, chaseLitCount = 1;
   let sparkleLastTs = 0, sparkleLevels = new Array(NUM_LEDS).fill(0);
   let gasPhaseJs = 0, gasTxActive = false, gasTxStart = 0, gasTxDepth = 0, gasTxCheck = 0;
 
   // ── Animation Loop ───────────────────────────────────────
   function resetAnimState(effect) {
     if (effect === 'gaslight') { gasPhaseJs = 0; gasTxActive = false; }
-    if (effect === 'chase')    { chasePos = 0; chaseLastTs = 0; }
+    if (effect === 'chase')    { chasePos = 0; chaseLastTs = 0; chaseRevStep = 0; chaseLitCount = 1; }
     if (effect === 'sparkle')  { sparkleLevels.fill(0); sparkleLastTs = 0; }
     if (effect === 'pulse')    { pulsePhase = 0; }
     if (effect === 'rainbow')  { rainbowHueJs = 0; }
@@ -1286,13 +1360,31 @@ input[type="range"]::-webkit-slider-thumb:hover {
         c.setAttribute('fill', `hsl(${(rainbowHueJs + i*(360/NUM_LEDS))%360},80%,42%)`);
       });
     } else if (state.effect === 'chase') {
-      if (ts - chaseLastTs > 60) { chaseLastTs = ts; chasePos = (chasePos + 1) % NUM_LEDS; }
+      const spd = state.chaseSpeed || 60;
+      const target = state.chaseSpokes || 8;
+      if (ts - chaseLastTs > spd) {
+        chaseLastTs = ts;
+        chasePos = (chasePos + 1) % NUM_LEDS;
+        // count steps; each full revolution may add a spoke during build-up
+        chaseRevStep++;
+        if (chaseRevStep >= NUM_LEDS) {
+          chaseRevStep = 0;
+          if (chaseLitCount < target) chaseLitCount++;
+        }
+      }
       circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
-      circles[chasePos].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
-      circles[(chasePos+1)%NUM_LEDS].setAttribute('fill',
-        `rgb(${Math.round(cr*140/255)},${Math.round(cg*140/255)},${Math.round(cb*140/255)})`);
-      circles[(chasePos+2)%NUM_LEDS].setAttribute('fill',
-        `rgb(${Math.round(cr*60/255)},${Math.round(cg*60/255)},${Math.round(cb*60/255)})`);
+      const n = chaseLitCount;
+      for (let s = 0; s < n; s++) {
+        const idx = (chasePos + Math.round(s * NUM_LEDS / n)) % NUM_LEDS;
+        circles[idx].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+        // short trailing dim on the leading spoke only
+        if (s === 0) {
+          circles[(idx + 1) % NUM_LEDS].setAttribute('fill',
+            `rgb(${Math.round(cr*0.55)},${Math.round(cg*0.55)},${Math.round(cb*0.55)})`);
+          circles[(idx + 2) % NUM_LEDS].setAttribute('fill',
+            `rgb(${Math.round(cr*0.22)},${Math.round(cg*0.22)},${Math.round(cb*0.22)})`);
+        }
+      }
     } else if (state.effect === 'sparkle') {
       if (ts - sparkleLastTs > 40) {
         sparkleLastTs = ts;
@@ -1469,6 +1561,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
       state.gasRunning = data.running;
       state.descentStart = data.descentStart;
 
+      state.chaseSpokes         = data.chaseSpokes   ?? state.chaseSpokes;
+      state.chaseSpeed          = data.chaseSpeed    ?? state.chaseSpeed;
       state.gasTargetSeconds    = data.targetSeconds;
       state.gasTotalCycles      = data.totalCycles;
       state.gasDescentCycles    = data.descentCycles;
@@ -1490,6 +1584,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
       brightnessSlider.value = state.brightness;
       brightnessVal.textContent = state.brightness;
 
+      safeSetInput('chaseSpokes',          state.chaseSpokes);
+      safeSetInput('chaseSpeed',           state.chaseSpeed);
       safeSetInput('gasTargetSeconds',    state.gasTargetSeconds);
       safeSetInput('gasTotalCycles',      state.gasTotalCycles);
       safeSetInput('gasDescentCycles',    state.gasDescentCycles);
@@ -1565,6 +1661,12 @@ input[type="range"]::-webkit-slider-thumb:hover {
           e.target.style.outline = '';
         }
       }
+    });
+  });
+
+  ['chaseSpokes', 'chaseSpeed'].forEach(id => {
+    document.getElementById(id).addEventListener('change', e => {
+      setParam(id, e.target.value);
     });
   });
 
@@ -1878,19 +1980,30 @@ void applyEffect() {
     }
 
   } else if (currentEffect == "chase") {
-    if (now - lastUpdate > 60) {
+    if (now - lastUpdate > (unsigned long)chaseSpeed) {
       lastUpdate = now;
       fill_solid(leds, NUM_LEDS, CRGB::Black);
 
-      leds[chasePos % NUM_LEDS] = currentColor;
-
-      leds[(chasePos + 1) % NUM_LEDS] = currentColor;
-      leds[(chasePos + 1) % NUM_LEDS].nscale8(140);
-
-      leds[(chasePos + 2) % NUM_LEDS] = currentColor;
-      leds[(chasePos + 2) % NUM_LEDS].nscale8(60);
-
+      // Advance position and track build-up
       chasePos = (chasePos + 1) % NUM_LEDS;
+      chaseRevStep++;
+      if (chaseRevStep >= NUM_LEDS) {
+        chaseRevStep = 0;
+        if (chaseLitCount < chaseSpokes) chaseLitCount++;
+      }
+
+      // Light evenly-spaced spokes
+      int n = chaseLitCount;
+      for (int s = 0; s < n; s++) {
+        int idx = (chasePos + (int)round((float)s * NUM_LEDS / n)) % NUM_LEDS;
+        leds[idx] = currentColor;
+      }
+      // Short trailing dim on leading spoke only
+      int t1 = (chasePos + 1) % NUM_LEDS;
+      int t2 = (chasePos + 2) % NUM_LEDS;
+      if (leds[t1] == CRGB(0,0,0)) { leds[t1] = currentColor; leds[t1].nscale8(140); }
+      if (leds[t2] == CRGB(0,0,0)) { leds[t2] = currentColor; leds[t2].nscale8(56);  }
+
       FastLED.setBrightness(brightness);
       FastLED.show();
     }
@@ -2020,7 +2133,9 @@ void handleEffect() {
     currentEffect = server.arg("effect");
     lastUpdate = 0;
 
-    if (currentEffect == "solid") {
+    if (currentEffect == "chase") {
+      chasePos = 0; chaseRevStep = 0; chaseLitCount = 1;
+    } else if (currentEffect == "solid") {
       fill_solid(leds, NUM_LEDS, currentColor);
       FastLED.setBrightness(brightness);
       FastLED.show();
@@ -2047,7 +2162,9 @@ void handleSetParam() {
   String name = server.arg("name");
   int value = server.arg("value").toInt();
 
-  if      (name == "gasTargetSeconds")     gasTargetSeconds     = max(1, value);
+  if      (name == "chaseSpokes")          { chaseSpokes = constrain(value, 1, NUM_LEDS); chaseLitCount = 1; chaseRevStep = 0; }
+  else if (name == "chaseSpeed")           chaseSpeed           = constrain(value, 10, 500);
+  else if (name == "gasTargetSeconds")     gasTargetSeconds     = max(1, value);
   else if (name == "gasTotalCycles")       gasTotalCycles       = max(1, value);
   else if (name == "gasDescentCycles")     gasDescentCycles     = constrain(value, 1, gasTotalCycles);
   else if (name == "gasMinBrightness")     gasMinBrightness     = constrain(value, 0, 255);
@@ -2097,6 +2214,8 @@ void handleGetStatus() {
   json += "\"effect\":\"" + currentEffect + "\",";
   json += "\"brightness\":" + String(brightness) + ",";
   json += "\"color\":\"" + colorToHex(currentColor) + "\",";
+  json += "\"chaseSpokes\":" + String(chaseSpokes) + ",";
+  json += "\"chaseSpeed\":"  + String(chaseSpeed)  + ",";
   json += "\"cycle\":" + String(gasCycleCounter) + ",";
   json += "\"totalCycles\":" + String(gasTotalCycles) + ",";
   json += "\"elapsed\":" + String(elapsed) + ",";
