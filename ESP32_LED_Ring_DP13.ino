@@ -61,9 +61,9 @@ int  loaderFlashCount = 0;    // number of on→off cycles completed
 bool loaderFlashOn    = false;
 unsigned long loaderFadeStart = 0;
 
-int sealPos   = 0;    // front LED of the 2-LED sliding window
-int sealStep  = 0;    // 0 = initial single LED; 1+ = sliding pair
-int sealSpeed = 100;  // ms per step
+int sealPos        = 1;    // front LED of the 2-LED window (orbits 1..NUM_LEDS-1)
+int sealLed0Bright = 0;    // LED 0 brightness; starts off, +10 per full rotation
+int sealSpeed      = 100;  // ms per step
 
 // ── Trigger State ─────────────────────────────────────────
 CRGB          triggerReturnColor = CRGB(74, 140, 58); // color to restore after trigger expiry
@@ -349,7 +349,7 @@ const ES={
   chase:   {pos:0,lastTs:0,revStep:0,litCount:1},
   sparkle: {lastTs:0,levels:new Array(NUM_LEDS).fill(0)},
   loader:  {base:1,sweep:1,lastTs:0,phase:0,flashCount:0,flashOn:false,fadeStart:0},
-  summon2: {pos:0,step:0,lastTs:0},
+  summon2: {pos:1,led0Bright:0,lastTs:0},
   gaslight:{phase:0,txActive:false,txStart:0,txDepth:0,txCheck:0},
 };
 const ES_RESET={
@@ -358,7 +358,7 @@ const ES_RESET={
   chase:   e=>{e.pos=0;e.lastTs=0;e.revStep=0;e.litCount=1;},
   sparkle: e=>{e.lastTs=0;e.levels.fill(0);},
   loader:  e=>{e.base=1;e.sweep=1;e.lastTs=0;e.phase=0;e.flashCount=0;e.flashOn=false;e.fadeStart=0;},
-  summon2: e=>{e.pos=0;e.step=0;e.lastTs=0;},
+  summon2: e=>{e.pos=1;e.led0Bright=0;e.lastTs=0;},
   gaslight:e=>{e.phase=0;e.txActive=false;},
 };
 const EFFECT_RENDERERS={
@@ -400,11 +400,12 @@ const EFFECT_RENDERERS={
     }
   },
   summon2:(ts,dt,cr,cg,cb,st)=>{
-    const e=ES.summon2,spd=100;
+    const e=ES.summon2,N=NUM_LEDS,spd=100;
     circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
-    if(ts-e.lastTs>spd){e.lastTs=ts;if(e.step===0){e.step=1;}else{e.pos=(e.pos+1)%NUM_LEDS;}}
-    if(e.step===0){circles[0].setAttribute('fill',`rgb(${cr},${cg},${cb})`);}
-    else{circles[e.pos].setAttribute('fill',`rgb(${cr},${cg},${cb})`);circles[(e.pos+1)%NUM_LEDS].setAttribute('fill',`rgb(${cr},${cg},${cb})`); }
+    if(ts-e.lastTs>spd){e.lastTs=ts;e.pos++;if(e.pos>=N){e.pos=1;e.led0Bright=Math.min(255,e.led0Bright+10);}}
+    if(e.led0Bright>0){const s=e.led0Bright/255;circles[0].setAttribute('fill',`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`); }
+    circles[e.pos].setAttribute('fill',`rgb(${cr},${cg},${cb})`);
+    circles[e.pos%(N-1)+1].setAttribute('fill',`rgb(${cr},${cg},${cb})`);
   },
   gaslight:(ts,dt,cr,cg,cb,st)=>{
     const e=ES.gaslight;e.phase+=Math.PI*2*1.5*dt;
@@ -1400,7 +1401,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     chase:    { pos: 0, lastTs: 0, revStep: 0, litCount: 1 },
     sparkle:  { lastTs: 0, levels: new Array(NUM_LEDS).fill(0) },
     loader:   { base: 1, sweep: 1, lastTs: 0, phase: 0, flashCount: 0, flashOn: false, fadeStart: 0 },
-    summon2:  { pos: 0, step: 0, lastTs: 0 },
+    summon2:  { pos: 1, led0Bright: 0, lastTs: 0 },
     gaslight: { phase: 0, txActive: false, txStart: 0, txDepth: 0, txCheck: 0 },
   };
   const ES_RESET = {
@@ -1409,7 +1410,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     chase:    e => { e.pos = 0; e.lastTs = 0; e.revStep = 0; e.litCount = 1; },
     sparkle:  e => { e.lastTs = 0; e.levels.fill(0); },
     loader:   e => { e.base = 1; e.sweep = 1; e.lastTs = 0; e.phase = 0; e.flashCount = 0; e.flashOn = false; e.fadeStart = 0; },
-    summon2:  e => { e.pos = 0; e.step = 0; e.lastTs = 0; },
+    summon2:  e => { e.pos = 1; e.led0Bright = 0; e.lastTs = 0; },
     gaslight: e => { e.phase = 0; e.txActive = false; },
   };
   const EFFECT_RENDERERS = {
@@ -1458,18 +1459,19 @@ input[type="range"]::-webkit-slider-thumb:hover {
       }
     },
     summon2: (ts, dt, cr, cg, cb) => {
-      const e = ES.summon2, spd = 100;
+      const e = ES.summon2, N = NUM_LEDS, spd = 100;
       circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
       if (ts - e.lastTs > spd) {
         e.lastTs = ts;
-        if (e.step === 0) { e.step = 1; } else { e.pos = (e.pos + 1) % NUM_LEDS; }
+        e.pos++;
+        if (e.pos >= N) { e.pos = 1; e.led0Bright = Math.min(255, e.led0Bright + 10); }
       }
-      if (e.step === 0) {
-        circles[0].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
-      } else {
-        circles[e.pos].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
-        circles[(e.pos + 1) % NUM_LEDS].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+      if (e.led0Bright > 0) {
+        const s = e.led0Bright / 255;
+        circles[0].setAttribute('fill', `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`);
       }
+      circles[e.pos].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+      circles[e.pos % (N - 1) + 1].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
     },
     gaslight: (ts, dt, cr, cg, cb) => {
       const e = ES.gaslight; e.phase += Math.PI * 2 * 1.5 * dt;
@@ -2205,7 +2207,7 @@ void renderOff()   { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
 
 // ── Summoning Seal II — 2-LED sliding window ──────────────
 void activateSummon2() {
-  sealPos = 0; sealStep = 0;
+  sealPos = 1; sealLed0Bright = 0;
   lastUpdate = 0;
 }
 void renderSummon2() {
@@ -2213,13 +2215,22 @@ void renderSummon2() {
   if (now - lastUpdate < (unsigned long)sealSpeed) return;
   lastUpdate = now;
   fill_solid(leds, NUM_LEDS, CRGB::Black);
-  if (sealStep == 0) {
-    leds[0] = currentColor;
-    sealStep = 1;
-  } else {
-    leds[sealPos] = currentColor;
-    leds[(sealPos + 1) % NUM_LEDS] = currentColor;
-    sealPos = (sealPos + 1) % NUM_LEDS;
+  // LED 0: off at first, brightens by 10 each full rotation
+  if (sealLed0Bright > 0) {
+    leds[0] = CRGB(
+      scale8(currentColor.r, (uint8_t)sealLed0Bright),
+      scale8(currentColor.g, (uint8_t)sealLed0Bright),
+      scale8(currentColor.b, (uint8_t)sealLed0Bright)
+    );
+  }
+  // 2-LED window orbits LEDs 1..NUM_LEDS-1 (skips LED 0)
+  leds[sealPos] = currentColor;
+  leds[sealPos % (NUM_LEDS - 1) + 1] = currentColor;
+  // Advance; on wrap increment LED 0 brightness
+  sealPos++;
+  if (sealPos >= NUM_LEDS) {
+    sealPos = 1;
+    sealLed0Bright = min(255, sealLed0Bright + 10);
   }
   FastLED.setBrightness(brightness);
   FastLED.show();
