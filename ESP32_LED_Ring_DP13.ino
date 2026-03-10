@@ -1361,29 +1361,25 @@ input[type="range"]::-webkit-slider-thumb:hover {
       });
     } else if (state.effect === 'chase') {
       const spd = state.chaseSpeed || 60;
-      const target = state.chaseSpokes || 8;
+      const spokesTarget = state.chaseSpokes || 8;
       if (ts - chaseLastTs > spd) {
         chaseLastTs = ts;
         chasePos = (chasePos + 1) % NUM_LEDS;
-        // count steps; each full revolution may add a spoke during build-up
-        chaseRevStep++;
-        if (chaseRevStep >= NUM_LEDS) {
-          chaseRevStep = 0;
-          if (chaseLitCount < target) chaseLitCount++;
+        // Build-up: add one spoke per full revolution until the ring is full
+        if (chaseLitCount < NUM_LEDS) {
+          chaseRevStep++;
+          if (chaseRevStep >= NUM_LEDS) {
+            chaseRevStep = 0;
+            chaseLitCount++;
+          }
         }
       }
       circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
-      const n = chaseLitCount;
+      // During build-up show chaseLitCount spokes; once full, hold at spokesTarget
+      const n = chaseLitCount < NUM_LEDS ? chaseLitCount : spokesTarget;
       for (let s = 0; s < n; s++) {
         const idx = (chasePos + Math.round(s * NUM_LEDS / n)) % NUM_LEDS;
         circles[idx].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
-        // short trailing dim on the leading spoke only
-        if (s === 0) {
-          circles[(idx + 1) % NUM_LEDS].setAttribute('fill',
-            `rgb(${Math.round(cr*0.55)},${Math.round(cg*0.55)},${Math.round(cb*0.55)})`);
-          circles[(idx + 2) % NUM_LEDS].setAttribute('fill',
-            `rgb(${Math.round(cr*0.22)},${Math.round(cg*0.22)},${Math.round(cb*0.22)})`);
-        }
       }
     } else if (state.effect === 'sparkle') {
       if (ts - sparkleLastTs > 40) {
@@ -1982,27 +1978,25 @@ void applyEffect() {
   } else if (currentEffect == "chase") {
     if (now - lastUpdate > (unsigned long)chaseSpeed) {
       lastUpdate = now;
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-
-      // Advance position and track build-up
       chasePos = (chasePos + 1) % NUM_LEDS;
-      chaseRevStep++;
-      if (chaseRevStep >= NUM_LEDS) {
-        chaseRevStep = 0;
-        if (chaseLitCount < chaseSpokes) chaseLitCount++;
+
+      // Build-up: add one spoke per full revolution until the ring is fully lit
+      if (chaseLitCount < NUM_LEDS) {
+        chaseRevStep++;
+        if (chaseRevStep >= NUM_LEDS) {
+          chaseRevStep = 0;
+          chaseLitCount++;
+        }
       }
 
-      // Light evenly-spaced spokes
-      int n = chaseLitCount;
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+
+      // During build-up show chaseLitCount spokes; once full, hold at chaseSpokes
+      int n = (chaseLitCount < NUM_LEDS) ? chaseLitCount : chaseSpokes;
       for (int s = 0; s < n; s++) {
         int idx = (chasePos + (int)round((float)s * NUM_LEDS / n)) % NUM_LEDS;
         leds[idx] = currentColor;
       }
-      // Short trailing dim on leading spoke only
-      int t1 = (chasePos + 1) % NUM_LEDS;
-      int t2 = (chasePos + 2) % NUM_LEDS;
-      if (leds[t1] == CRGB(0,0,0)) { leds[t1] = currentColor; leds[t1].nscale8(140); }
-      if (leds[t2] == CRGB(0,0,0)) { leds[t2] = currentColor; leds[t2].nscale8(56);  }
 
       FastLED.setBrightness(brightness);
       FastLED.show();
