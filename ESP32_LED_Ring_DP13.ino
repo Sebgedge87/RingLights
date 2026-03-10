@@ -23,8 +23,7 @@
 #define LED_TYPE    WS2812B
 #define COLOR_ORDER GRB
 
-const char* WIFI_SSID = "2.4";
-const char* WIFI_PASS = "Xt_ew25rl!kqZrV";
+#include "credentials.h"
 
 // ── INMP441 I2S Microphone Pins ───────────────────────────
 #define I2S_SCK_PIN   14
@@ -32,7 +31,8 @@ const char* WIFI_PASS = "Xt_ew25rl!kqZrV";
 #define I2S_SD_PIN    32
 
 // ── Phrase Config ─────────────────────────────────────────
-#define MAX_PHRASES   5
+#define MAX_PHRASES    5
+#define CONFIG_VERSION 2   // Increment when saved schema changes
 // ──────────────────────────────────────────────────────────
 
 CRGB leds[NUM_LEDS];
@@ -52,12 +52,17 @@ int chaseSpeed    = 60;  // ms per step
 int rainbowHue    = 0;
 
 int  loaderSpeed      = 80;   // ms per LED step during build-up
+int  loaderFlashMs    = 200;  // ms per flash toggle (phase 1)
+int  loaderFadeSec    = 21;   // seconds for green fade-in (phase 2)
 int  loaderBase       = 1;    // LEDs permanently lit at start of each revolution
 int  loaderSweep      = 1;    // current sweep position (index up to NUM_LEDS-1)
 int  loaderPhase      = 0;    // 0=buildup  1=flash  2=fadein
 int  loaderFlashCount = 0;    // number of on→off cycles completed
 bool loaderFlashOn    = false;
 unsigned long loaderFadeStart = 0;
+
+// ── Trigger State ─────────────────────────────────────────
+CRGB          triggerReturnColor = CRGB(74, 140, 58); // color to restore after trigger expiry
 
 // ── Gaslight Parameters ───────────────────────────────────
 int gasMaxBrightness     = 255;
@@ -99,7 +104,6 @@ bool         micInitDone  = false;
 PhraseConfig phraseConfigs[MAX_PHRASES];
 int          phraseCount  = 0;
 
-// ── Trigger State ─────────────────────────────────────────
 bool          triggerActive   = false;
 unsigned long triggerStartMs  = 0;
 int           triggerDuration = 0;
@@ -329,85 +333,86 @@ for(let i=0;i<NUM_LEDS;i++){
 const EFFECT_NAMES={solid:'Steady Glow',pulse:'Heartbeat',rainbow:'Prismatic Rift',
   chase:'Elder Sign Chase',sparkle:'Spectral Flicker',gaslight:'Gaslight Vigil',loader:'Summoning Seal',off_effect:'Extinguished'};
 let state={power:true,color:'#4a8c3a',brightness:180,effect:'solid',
+  chaseSpokes:8,chaseSpeed:60,loaderSpeed:80,loaderFlashMs:200,loaderFadeSec:21,
   gasCycle:1,gasTotalCycles:7,gasMinBrightness:190,gasMaxBrightness:255,
   gasDeepBrightnessMin:5,gasDeepBrightnessMax:25,gasDescentCycles:2,
   gasVariation:15,gasWarnProbability:10,descentStart:6};
-let animLastTs=0,pulsePhase=0,rainbowHue=0;
-let chasePos=0,chaseLastTs=0;
-let sparkleLastTs=0,sparkleLevels=new Array(NUM_LEDS).fill(0);
-let loaderBaseP=1,loaderSweepP=1,loaderLastTsP=0,loaderPhaseP=0,loaderFlashCountP=0,loaderFlashOnP=false,loaderFadeStartP=0;
-let gasPhase=0,gasTxActive=false,gasTxStart=0,gasTxDepth=0,gasTxCheck=0;
+let animLastTs=0;
+// ── Per-effect mutable state (player page) ────────────────
+const ES={
+  pulse:   {phase:0},
+  rainbow: {hue:0},
+  chase:   {pos:0,lastTs:0,revStep:0,litCount:1},
+  sparkle: {lastTs:0,levels:new Array(NUM_LEDS).fill(0)},
+  loader:  {base:1,sweep:1,lastTs:0,phase:0,flashCount:0,flashOn:false,fadeStart:0},
+  gaslight:{phase:0,txActive:false,txStart:0,txDepth:0,txCheck:0},
+};
+const ES_RESET={
+  pulse:   e=>{e.phase=0;},
+  rainbow: e=>{e.hue=0;},
+  chase:   e=>{e.pos=0;e.lastTs=0;e.revStep=0;e.litCount=1;},
+  sparkle: e=>{e.lastTs=0;e.levels.fill(0);},
+  loader:  e=>{e.base=1;e.sweep=1;e.lastTs=0;e.phase=0;e.flashCount=0;e.flashOn=false;e.fadeStart=0;},
+  gaslight:e=>{e.phase=0;e.txActive=false;},
+};
+const EFFECT_RENDERERS={
+  solid:(ts,dt,cr,cg,cb,st)=>{
+    circles.forEach(c=>c.setAttribute('fill',st.color));
+  },
+  pulse:(ts,dt,cr,cg,cb,st)=>{
+    const e=ES.pulse;e.phase+=0.05;
+    const s=0.04+Math.max(0,0.5+0.5*Math.sin(e.phase))*0.96;
+    circles.forEach(c=>c.setAttribute('fill',`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`));
+  },
+  rainbow:(ts,dt,cr,cg,cb,st)=>{
+    const e=ES.rainbow;e.hue=(e.hue+2)%360;
+    circles.forEach((c,i)=>c.setAttribute('fill',`hsl(${(e.hue+i*(360/NUM_LEDS))%360},80%,42%)`));
+  },
+  chase:(ts,dt,cr,cg,cb,st)=>{
+    const e=ES.chase,spd=st.chaseSpeed||60,tgt=st.chaseSpokes||8;
+    if(ts-e.lastTs>spd){e.lastTs=ts;e.pos=(e.pos+1)%NUM_LEDS;if(e.litCount<NUM_LEDS){e.revStep++;if(e.revStep>=NUM_LEDS){e.revStep=0;e.litCount++;}}}
+    circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
+    const n=e.litCount<NUM_LEDS?e.litCount:tgt;
+    for(let s=0;s<n;s++)circles[(e.pos+Math.round(s*NUM_LEDS/n))%NUM_LEDS].setAttribute('fill',`rgb(${cr},${cg},${cb})`);
+  },
+  sparkle:(ts,dt,cr,cg,cb,st)=>{
+    const e=ES.sparkle;
+    if(ts-e.lastTs>40){e.lastTs=ts;e.levels=e.levels.map(v=>v*(180/255));e.levels[Math.floor(Math.random()*NUM_LEDS)]=1;}
+    circles.forEach((c,i)=>c.setAttribute('fill',`rgb(${Math.round(cr*e.levels[i])},${Math.round(cg*e.levels[i])},${Math.round(cb*e.levels[i])})`));
+  },
+  loader:(ts,dt,cr,cg,cb,st)=>{
+    const e=ES.loader,spd=st.loaderSpeed||80,fms=st.loaderFlashMs||200,fsec=st.loaderFadeSec||21;
+    if(e.phase===0){
+      if(ts-e.lastTs>spd){e.lastTs=ts;e.sweep++;if(e.sweep>NUM_LEDS){e.base++;if(e.base>NUM_LEDS){e.phase=1;e.flashCount=0;e.flashOn=true;e.lastTs=ts;}else e.sweep=e.base;}}
+      circles.forEach((c,i)=>c.setAttribute('fill',i<e.sweep?`rgb(${cr},${cg},${cb})`:'#2a1a08'));
+    }else if(e.phase===1){
+      if(ts-e.lastTs>fms){e.lastTs=ts;e.flashOn=!e.flashOn;if(!e.flashOn){e.flashCount++;if(e.flashCount>=7){e.phase=2;e.fadeStart=ts;}}}
+      circles.forEach(c=>c.setAttribute('fill',e.flashOn?`rgb(${cr},${cg},${cb})`:'#2a1a08'));
+    }else{
+      const g=Math.round(Math.min(1,(ts-e.fadeStart)/(fsec*1000))*255);
+      circles.forEach(c=>c.setAttribute('fill',`rgb(0,${g},0)`));
+    }
+  },
+  gaslight:(ts,dt,cr,cg,cb,st)=>{
+    const e=ES.gaslight;e.phase+=Math.PI*2*1.5*dt;
+    const dStart=st.descentStart,inD=st.gasCycle>=dStart,inW=!inD&&st.gasCycle===dStart-1;
+    let bMin=inD?st.gasDeepBrightnessMin:st.gasMinBrightness,bMax=inD?st.gasDeepBrightnessMax:st.gasMaxBrightness;
+    if(inD&&st.gasDescentCycles>1){const p=(st.gasCycle-dStart)/(st.gasDescentCycles-1);bMin=st.gasMinBrightness+(st.gasDeepBrightnessMin-st.gasMinBrightness)*p;bMax=st.gasMaxBrightness+(st.gasDeepBrightnessMax-st.gasMaxBrightness)*p;}
+    let wb=bMin+(0.5+0.5*Math.sin(e.phase))*(bMax-bMin);
+    if(!e.txActive&&ts-e.txCheck>100){e.txCheck=ts;if(Math.random()*100<(inW?st.gasWarnProbability*3:st.gasWarnProbability)){e.txActive=true;e.txStart=ts;e.txDepth=40+Math.random()*50;}}
+    let fb=wb;if(e.txActive){const age=ts-e.txStart;if(age<80)fb=Math.max(5,wb-e.txDepth);else e.txActive=false;}
+    fb=Math.max(5,Math.min(255,fb))/255;
+    circles.forEach(c=>{const v=st.gasVariation>0?(Math.random()-0.5)*2*st.gasVariation/255:0;const s=Math.max(0.02,Math.min(1,fb+v));c.setAttribute('fill',`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`);});
+  },
+};
+let prevEffectP='';
 function animLoop(ts){
   const dt=animLastTs?Math.min((ts-animLastTs)/1000,0.1):0.016;
   animLastTs=ts;
-  const cr=parseInt(state.color.slice(1,3),16);
-  const cg=parseInt(state.color.slice(3,5),16);
-  const cb=parseInt(state.color.slice(5,7),16);
-  if(!state.power||state.effect==='off_effect'){
-    circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
-  } else if(state.effect==='solid'){
-    circles.forEach(c=>c.setAttribute('fill',state.color));
-  } else if(state.effect==='pulse'){
-    pulsePhase+=0.05;
-    const s=0.04+Math.max(0,0.5+0.5*Math.sin(pulsePhase))*0.96;
-    const f=`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`;
-    circles.forEach(c=>c.setAttribute('fill',f));
-  } else if(state.effect==='rainbow'){
-    rainbowHue=(rainbowHue+2)%360;
-    circles.forEach((c,i)=>c.setAttribute('fill',`hsl(${(rainbowHue+i*(360/NUM_LEDS))%360},80%,42%)`));
-  } else if(state.effect==='chase'){
-    if(ts-chaseLastTs>60){chaseLastTs=ts;chasePos=(chasePos+1)%NUM_LEDS;}
-    circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
-    circles[chasePos].setAttribute('fill',`rgb(${cr},${cg},${cb})`);
-    circles[(chasePos+1)%NUM_LEDS].setAttribute('fill',`rgb(${Math.round(cr*140/255)},${Math.round(cg*140/255)},${Math.round(cb*140/255)})`);
-    circles[(chasePos+2)%NUM_LEDS].setAttribute('fill',`rgb(${Math.round(cr*60/255)},${Math.round(cg*60/255)},${Math.round(cb*60/255)})`);
-  } else if(state.effect==='sparkle'){
-    if(ts-sparkleLastTs>40){
-      sparkleLastTs=ts;
-      sparkleLevels=sparkleLevels.map(v=>v*(180/255));
-      sparkleLevels[Math.floor(Math.random()*NUM_LEDS)]=1.0;
-    }
-    circles.forEach((c,i)=>c.setAttribute('fill',`rgb(${Math.round(cr*sparkleLevels[i])},${Math.round(cg*sparkleLevels[i])},${Math.round(cb*sparkleLevels[i])})`));
-  } else if(state.effect==='loader'){
-    const spd=state.loaderSpeed||80;
-    if(loaderPhaseP===0){
-      if(ts-loaderLastTsP>spd){loaderLastTsP=ts;loaderSweepP++;if(loaderSweepP>NUM_LEDS){loaderBaseP++;if(loaderBaseP>NUM_LEDS){loaderPhaseP=1;loaderFlashCountP=0;loaderFlashOnP=true;loaderLastTsP=ts;}else{loaderSweepP=loaderBaseP;}}}
-      circles.forEach((c,i)=>c.setAttribute('fill',i<loaderSweepP?`rgb(${cr},${cg},${cb})`:'#2a1a08'));
-    } else if(loaderPhaseP===1){
-      if(ts-loaderLastTsP>200){loaderLastTsP=ts;loaderFlashOnP=!loaderFlashOnP;if(!loaderFlashOnP){loaderFlashCountP++;if(loaderFlashCountP>=7){loaderPhaseP=2;loaderFadeStartP=ts;}}}
-      circles.forEach(c=>c.setAttribute('fill',loaderFlashOnP?`rgb(${cr},${cg},${cb})`:'#2a1a08'));
-    } else {
-      const g=Math.round(Math.min(1,(ts-loaderFadeStartP)/21000)*255);
-      circles.forEach(c=>c.setAttribute('fill',`rgb(0,${g},0)`));
-    }
-  } else if(state.effect==='gaslight'){
-    gasPhase+=Math.PI*2*1.5*dt;
-    const dStart=state.descentStart;
-    const inD=state.gasCycle>=dStart;
-    const inW=!inD&&state.gasCycle===dStart-1;
-    let bMin=inD?state.gasDeepBrightnessMin:state.gasMinBrightness;
-    let bMax=inD?state.gasDeepBrightnessMax:state.gasMaxBrightness;
-    if(inD&&state.gasDescentCycles>1){
-      const p=(state.gasCycle-dStart)/(state.gasDescentCycles-1);
-      bMin=state.gasMinBrightness+(state.gasDeepBrightnessMin-state.gasMinBrightness)*p;
-      bMax=state.gasMaxBrightness+(state.gasDeepBrightnessMax-state.gasMaxBrightness)*p;
-    }
-    let wb=bMin+(0.5+0.5*Math.sin(gasPhase))*(bMax-bMin);
-    if(!gasTxActive&&ts-gasTxCheck>100){
-      gasTxCheck=ts;
-      if(Math.random()*100<(inW?state.gasWarnProbability*3:state.gasWarnProbability)){
-        gasTxActive=true;gasTxStart=ts;gasTxDepth=40+Math.random()*50;
-      }
-    }
-    let fb=wb;
-    if(gasTxActive){const age=ts-gasTxStart;if(age<80)fb=Math.max(5,wb-gasTxDepth);else gasTxActive=false;}
-    fb=Math.max(5,Math.min(255,fb))/255;
-    circles.forEach(c=>{
-      const v=state.gasVariation>0?(Math.random()-0.5)*2*state.gasVariation/255:0;
-      const s=Math.max(0.02,Math.min(1,fb+v));
-      c.setAttribute('fill',`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`);
-    });
-  }
+  if(state.effect!==prevEffectP){const r=ES_RESET[state.effect];if(r&&ES[state.effect])r(ES[state.effect]);prevEffectP=state.effect;}
+  const cr=parseInt(state.color.slice(1,3),16),cg=parseInt(state.color.slice(3,5),16),cb=parseInt(state.color.slice(5,7),16);
+  if(!state.power||state.effect==='off_effect'){circles.forEach(c=>c.setAttribute('fill','#2a1a08'));}
+  else{const render=EFFECT_RENDERERS[state.effect];if(render)render(ts,dt,cr,cg,cb,state);}
   ringDotsP.style.opacity=state.power?(0.12+(state.brightness/255)*0.88):'0.08';
   requestAnimationFrame(animLoop);
 }
@@ -417,6 +422,8 @@ async function pollStatus(){
     const r=await fetch('/getStatus',{signal:AbortSignal.timeout(2000)});
     const d=await r.json();
     state.power=d.power;state.effect=d.effect;state.brightness=d.brightness;state.color=d.color;
+    state.chaseSpeed=d.chaseSpeed??state.chaseSpeed;state.chaseSpokes=d.chaseSpokes??state.chaseSpokes;
+    state.loaderSpeed=d.loaderSpeed??state.loaderSpeed;state.loaderFlashMs=d.loaderFlashMs??state.loaderFlashMs;state.loaderFadeSec=d.loaderFadeSec??state.loaderFadeSec;
     state.gasCycle=d.cycle;state.gasTotalCycles=d.totalCycles;
     state.gasMinBrightness=d.minBrightness;state.gasMaxBrightness=d.maxBrightness;
     state.gasDeepBrightnessMin=d.deepBrightnessMin;state.gasDeepBrightnessMax=d.deepBrightnessMax;
@@ -1174,12 +1181,20 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
     <hr class="divider">
 
-    <div class="field-label">Summoning Seal — Fill Speed</div>
-    <p class="field-hint">Each step lights one additional LED sequentially around the ring, filling it like a loading wheel. Resets to 1 LED after the ring is full.</p>
+    <div class="field-label">Summoning Seal — Ritual Parameters</div>
+    <p class="field-hint">Each step lights one additional LED sequentially around the ring. After all 24 revolutions, the ring flashes then fades in green.</p>
     <div class="chase-grid">
       <div class="chase-row">
         <label for="loaderSpeed">Step Speed<span class="gas-hint">Milliseconds per LED (20–1000)</span></label>
         <input type="number" id="loaderSpeed" min="20" max="1000" value="80">
+      </div>
+      <div class="chase-row">
+        <label for="loaderFlashMs">Flash Speed<span class="gas-hint">Milliseconds per flash toggle (50–2000)</span></label>
+        <input type="number" id="loaderFlashMs" min="50" max="2000" value="200">
+      </div>
+      <div class="chase-row">
+        <label for="loaderFadeSec">Fade Duration<span class="gas-hint">Seconds for green fade-in (1–300)</span></label>
+        <input type="number" id="loaderFadeSec" min="1" max="300" value="21">
       </div>
     </div>
 
@@ -1344,6 +1359,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
     chaseSpokes: 8,
     chaseSpeed: 60,
     loaderSpeed: 80,
+    loaderFlashMs: 200,
+    loaderFadeSec: 21,
     gasTargetSeconds: 777,
     gasTotalCycles: 7,
     gasDescentCycles: 2,
@@ -1360,21 +1377,95 @@ input[type="range"]::-webkit-slider-thumb:hover {
   };
 
   // ── Animation State ──────────────────────────────────────
-  let animLastTs = 0, pulsePhase = 0, rainbowHueJs = 0;
-  let chasePos = 0, chaseLastTs = 0, chaseRevStep = 0, chaseLitCount = 1;
-  let sparkleLastTs = 0, sparkleLevels = new Array(NUM_LEDS).fill(0);
-  let loaderBase = 1, loaderSweep = 1, loaderLastTs = 0;
-  let loaderPhase = 0, loaderFlashCount = 0, loaderFlashOn = false, loaderFadeStart = 0;
-  let gasPhaseJs = 0, gasTxActive = false, gasTxStart = 0, gasTxDepth = 0, gasTxCheck = 0;
+  let animLastTs = 0;
+  const ES = {
+    pulse:    { phase: 0 },
+    rainbow:  { hue: 0 },
+    chase:    { pos: 0, lastTs: 0, revStep: 0, litCount: 1 },
+    sparkle:  { lastTs: 0, levels: new Array(NUM_LEDS).fill(0) },
+    loader:   { base: 1, sweep: 1, lastTs: 0, phase: 0, flashCount: 0, flashOn: false, fadeStart: 0 },
+    gaslight: { phase: 0, txActive: false, txStart: 0, txDepth: 0, txCheck: 0 },
+  };
+  const ES_RESET = {
+    pulse:    e => { e.phase = 0; },
+    rainbow:  e => { e.hue = 0; },
+    chase:    e => { e.pos = 0; e.lastTs = 0; e.revStep = 0; e.litCount = 1; },
+    sparkle:  e => { e.lastTs = 0; e.levels.fill(0); },
+    loader:   e => { e.base = 1; e.sweep = 1; e.lastTs = 0; e.phase = 0; e.flashCount = 0; e.flashOn = false; e.fadeStart = 0; },
+    gaslight: e => { e.phase = 0; e.txActive = false; },
+  };
+  const EFFECT_RENDERERS = {
+    solid: (ts, dt, cr, cg, cb) => {
+      circles.forEach(c => c.setAttribute('fill', state.color));
+    },
+    pulse: (ts, dt, cr, cg, cb) => {
+      const e = ES.pulse; e.phase += 0.05;
+      const s = 0.04 + Math.max(0, 0.5 + 0.5 * Math.sin(e.phase)) * 0.96;
+      circles.forEach(c => c.setAttribute('fill', `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`));
+    },
+    rainbow: (ts, dt, cr, cg, cb) => {
+      const e = ES.rainbow; e.hue = (e.hue + 2) % 360;
+      circles.forEach((c, i) => c.setAttribute('fill', `hsl(${(e.hue + i*(360/NUM_LEDS))%360},80%,42%)`));
+    },
+    chase: (ts, dt, cr, cg, cb) => {
+      const e = ES.chase, spd = state.chaseSpeed || 60, tgt = state.chaseSpokes || 8;
+      if (ts - e.lastTs > spd) {
+        e.lastTs = ts; e.pos = (e.pos + 1) % NUM_LEDS;
+        if (e.litCount < NUM_LEDS) { e.revStep++; if (e.revStep >= NUM_LEDS) { e.revStep = 0; e.litCount++; } }
+      }
+      circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
+      const n = e.litCount < NUM_LEDS ? e.litCount : tgt;
+      for (let s = 0; s < n; s++)
+        circles[(e.pos + Math.round(s * NUM_LEDS / n)) % NUM_LEDS].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+    },
+    sparkle: (ts, dt, cr, cg, cb) => {
+      const e = ES.sparkle;
+      if (ts - e.lastTs > 40) { e.lastTs = ts; e.levels = e.levels.map(v => v * (180/255)); e.levels[Math.floor(Math.random() * NUM_LEDS)] = 1.0; }
+      circles.forEach((c, i) => { const sl = e.levels[i]; c.setAttribute('fill', `rgb(${Math.round(cr*sl)},${Math.round(cg*sl)},${Math.round(cb*sl)})`); });
+    },
+    loader: (ts, dt, cr, cg, cb) => {
+      const e = ES.loader, spd = state.loaderSpeed || 80, fms = state.loaderFlashMs || 200, fsec = state.loaderFadeSec || 21;
+      if (e.phase === 0) {
+        if (ts - e.lastTs > spd) {
+          e.lastTs = ts; e.sweep++;
+          if (e.sweep > NUM_LEDS) { e.base++; if (e.base > NUM_LEDS) { e.phase = 1; e.flashCount = 0; e.flashOn = true; e.lastTs = ts; } else e.sweep = e.base; }
+        }
+        circles.forEach((c, i) => c.setAttribute('fill', i < e.sweep ? `rgb(${cr},${cg},${cb})` : '#2a1a08'));
+      } else if (e.phase === 1) {
+        if (ts - e.lastTs > fms) { e.lastTs = ts; e.flashOn = !e.flashOn; if (!e.flashOn) { e.flashCount++; if (e.flashCount >= 7) { e.phase = 2; e.fadeStart = ts; } } }
+        circles.forEach(c => c.setAttribute('fill', e.flashOn ? `rgb(${cr},${cg},${cb})` : '#2a1a08'));
+      } else {
+        const g = Math.round(Math.min(1, (ts - e.fadeStart) / (fsec * 1000)) * 255);
+        circles.forEach(c => c.setAttribute('fill', `rgb(0,${g},0)`));
+      }
+    },
+    gaslight: (ts, dt, cr, cg, cb) => {
+      const e = ES.gaslight; e.phase += Math.PI * 2 * 1.5 * dt;
+      const dStart = state.descentStart, inD = state.gasCycle >= dStart, inW = !inD && state.gasCycle === dStart - 1;
+      let bMin = inD ? state.gasDeepBrightnessMin : state.gasMinBrightness;
+      let bMax = inD ? state.gasDeepBrightnessMax : state.gasMaxBrightness;
+      if (inD && state.gasDescentCycles > 1) {
+        const p = (state.gasCycle - dStart) / (state.gasDescentCycles - 1);
+        bMin = state.gasMinBrightness + (state.gasDeepBrightnessMin - state.gasMinBrightness) * p;
+        bMax = state.gasMaxBrightness + (state.gasDeepBrightnessMax - state.gasMaxBrightness) * p;
+      }
+      let wb = bMin + (0.5 + 0.5 * Math.sin(e.phase)) * (bMax - bMin);
+      if (!e.txActive && ts - e.txCheck > 100) {
+        e.txCheck = ts;
+        if (Math.random() * 100 < (inW ? state.gasWarnProbability * 3 : state.gasWarnProbability))
+          { e.txActive = true; e.txStart = ts; e.txDepth = 40 + Math.random() * 50; }
+      }
+      let fb = wb;
+      if (e.txActive) { const age = ts - e.txStart; if (age < 80) fb = Math.max(5, wb - e.txDepth); else e.txActive = false; }
+      fb = Math.max(5, Math.min(255, fb)) / 255;
+      circles.forEach(c => { const v = state.gasVariation > 0 ? (Math.random() - 0.5) * 2 * state.gasVariation / 255 : 0; const s = Math.max(0.02, Math.min(1, fb + v)); c.setAttribute('fill', `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`); });
+    },
+  };
 
   // ── Animation Loop ───────────────────────────────────────
   function resetAnimState(effect) {
-    if (effect === 'gaslight') { gasPhaseJs = 0; gasTxActive = false; }
-    if (effect === 'chase')    { chasePos = 0; chaseLastTs = 0; chaseRevStep = 0; chaseLitCount = 1; }
-    if (effect === 'sparkle')  { sparkleLevels.fill(0); sparkleLastTs = 0; }
-    if (effect === 'loader')   { loaderBase = 1; loaderSweep = 1; loaderLastTs = 0; loaderPhase = 0; loaderFlashCount = 0; loaderFlashOn = false; loaderFadeStart = 0; }
-    if (effect === 'pulse')    { pulsePhase = 0; }
-    if (effect === 'rainbow')  { rainbowHueJs = 0; }
+    const reset = ES_RESET[effect];
+    if (reset && ES[effect]) reset(ES[effect]);
   }
 
   function animLoop(ts) {
@@ -1383,116 +1474,12 @@ input[type="range"]::-webkit-slider-thumb:hover {
     const cr = parseInt(state.color.slice(1,3), 16);
     const cg = parseInt(state.color.slice(3,5), 16);
     const cb = parseInt(state.color.slice(5,7), 16);
-
     if (!state.power || state.effect === 'off_effect') {
       circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
-    } else if (state.effect === 'solid') {
-      circles.forEach(c => c.setAttribute('fill', state.color));
-    } else if (state.effect === 'pulse') {
-      pulsePhase += 0.05;
-      const s = 0.04 + Math.max(0, 0.5 + 0.5 * Math.sin(pulsePhase)) * 0.96;
-      const f = `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`;
-      circles.forEach(c => c.setAttribute('fill', f));
-    } else if (state.effect === 'rainbow') {
-      rainbowHueJs = (rainbowHueJs + 2) % 360;
-      circles.forEach((c, i) => {
-        c.setAttribute('fill', `hsl(${(rainbowHueJs + i*(360/NUM_LEDS))%360},80%,42%)`);
-      });
-    } else if (state.effect === 'chase') {
-      const spd = state.chaseSpeed || 60;
-      const spokesTarget = state.chaseSpokes || 8;
-      if (ts - chaseLastTs > spd) {
-        chaseLastTs = ts;
-        chasePos = (chasePos + 1) % NUM_LEDS;
-        // Build-up: add one spoke per full revolution until the ring is full
-        if (chaseLitCount < NUM_LEDS) {
-          chaseRevStep++;
-          if (chaseRevStep >= NUM_LEDS) {
-            chaseRevStep = 0;
-            chaseLitCount++;
-          }
-        }
-      }
-      circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
-      // During build-up show chaseLitCount spokes; once full, hold at spokesTarget
-      const n = chaseLitCount < NUM_LEDS ? chaseLitCount : spokesTarget;
-      for (let s = 0; s < n; s++) {
-        const idx = (chasePos + Math.round(s * NUM_LEDS / n)) % NUM_LEDS;
-        circles[idx].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
-      }
-    } else if (state.effect === 'sparkle') {
-      if (ts - sparkleLastTs > 40) {
-        sparkleLastTs = ts;
-        sparkleLevels = sparkleLevels.map(v => v * (180/255));
-        sparkleLevels[Math.floor(Math.random() * NUM_LEDS)] = 1.0;
-      }
-      circles.forEach((c, i) => {
-        const sl = sparkleLevels[i];
-        c.setAttribute('fill', `rgb(${Math.round(cr*sl)},${Math.round(cg*sl)},${Math.round(cb*sl)})`);
-      });
-    } else if (state.effect === 'loader') {
-      const spd = state.loaderSpeed || 80;
-      if (loaderPhase === 0) {
-        if (ts - loaderLastTs > spd) {
-          loaderLastTs = ts;
-          loaderSweep++;
-          if (loaderSweep > NUM_LEDS) {
-            loaderBase++;
-            if (loaderBase > NUM_LEDS) {
-              loaderPhase = 1; loaderFlashCount = 0; loaderFlashOn = true; loaderLastTs = ts;
-            } else {
-              loaderSweep = loaderBase;
-            }
-          }
-        }
-        circles.forEach((c, i) => c.setAttribute('fill', i < loaderSweep ? `rgb(${cr},${cg},${cb})` : '#2a1a08'));
-      } else if (loaderPhase === 1) {
-        if (ts - loaderLastTs > 200) {
-          loaderLastTs = ts;
-          loaderFlashOn = !loaderFlashOn;
-          if (!loaderFlashOn) {
-            loaderFlashCount++;
-            if (loaderFlashCount >= 7) { loaderPhase = 2; loaderFadeStart = ts; }
-          }
-        }
-        circles.forEach(c => c.setAttribute('fill', loaderFlashOn ? `rgb(${cr},${cg},${cb})` : '#2a1a08'));
-      } else {
-        const g = Math.round(Math.min(1, (ts - loaderFadeStart) / 21000) * 255);
-        circles.forEach(c => c.setAttribute('fill', `rgb(0,${g},0)`));
-      }
-    } else if (state.effect === 'gaslight') {
-      gasPhaseJs += Math.PI * 2 * 1.5 * dt;
-      const dStart = state.descentStart;
-      const inD = state.gasCycle >= dStart;
-      const inW = !inD && state.gasCycle === dStart - 1;
-      let bMin = inD ? state.gasDeepBrightnessMin : state.gasMinBrightness;
-      let bMax = inD ? state.gasDeepBrightnessMax : state.gasMaxBrightness;
-      if (inD && state.gasDescentCycles > 1) {
-        const p = (state.gasCycle - dStart) / (state.gasDescentCycles - 1);
-        bMin = state.gasMinBrightness + (state.gasDeepBrightnessMin - state.gasMinBrightness) * p;
-        bMax = state.gasMaxBrightness + (state.gasDeepBrightnessMax - state.gasMaxBrightness) * p;
-      }
-      let wb = bMin + (0.5 + 0.5 * Math.sin(gasPhaseJs)) * (bMax - bMin);
-      if (!gasTxActive && ts - gasTxCheck > 100) {
-        gasTxCheck = ts;
-        if (Math.random() * 100 < (inW ? state.gasWarnProbability * 3 : state.gasWarnProbability)) {
-          gasTxActive = true; gasTxStart = ts; gasTxDepth = 40 + Math.random() * 50;
-        }
-      }
-      let fb = wb;
-      if (gasTxActive) {
-        const age = ts - gasTxStart;
-        if (age < 80) fb = Math.max(5, wb - gasTxDepth);
-        else gasTxActive = false;
-      }
-      fb = Math.max(5, Math.min(255, fb)) / 255;
-      circles.forEach(c => {
-        const v = state.gasVariation > 0 ? (Math.random() - 0.5) * 2 * state.gasVariation / 255 : 0;
-        const s = Math.max(0.02, Math.min(1, fb + v));
-        c.setAttribute('fill', `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`);
-      });
+    } else {
+      const render = EFFECT_RENDERERS[state.effect];
+      if (render) render(ts, dt, cr, cg, cb);
     }
-
     ringDots.style.opacity = state.power ? (0.12 + (state.brightness / 255) * 0.88) : '0.08';
     requestAnimationFrame(animLoop);
   }
@@ -1626,9 +1613,11 @@ input[type="range"]::-webkit-slider-thumb:hover {
       state.gasRunning = data.running;
       state.descentStart = data.descentStart;
 
-      state.chaseSpokes         = data.chaseSpokes   ?? state.chaseSpokes;
-      state.chaseSpeed          = data.chaseSpeed    ?? state.chaseSpeed;
-      state.loaderSpeed         = data.loaderSpeed   ?? state.loaderSpeed;
+      state.chaseSpokes         = data.chaseSpokes    ?? state.chaseSpokes;
+      state.chaseSpeed          = data.chaseSpeed     ?? state.chaseSpeed;
+      state.loaderSpeed         = data.loaderSpeed    ?? state.loaderSpeed;
+      state.loaderFlashMs       = data.loaderFlashMs  ?? state.loaderFlashMs;
+      state.loaderFadeSec       = data.loaderFadeSec  ?? state.loaderFadeSec;
       state.gasTargetSeconds    = data.targetSeconds;
       state.gasTotalCycles      = data.totalCycles;
       state.gasDescentCycles    = data.descentCycles;
@@ -1650,9 +1639,11 @@ input[type="range"]::-webkit-slider-thumb:hover {
       brightnessSlider.value = state.brightness;
       brightnessVal.textContent = state.brightness;
 
-      safeSetInput('chaseSpokes',          state.chaseSpokes);
-      safeSetInput('chaseSpeed',           state.chaseSpeed);
-      safeSetInput('loaderSpeed',          state.loaderSpeed);
+      safeSetInput('chaseSpokes',   state.chaseSpokes);
+      safeSetInput('chaseSpeed',    state.chaseSpeed);
+      safeSetInput('loaderSpeed',   state.loaderSpeed);
+      safeSetInput('loaderFlashMs', state.loaderFlashMs);
+      safeSetInput('loaderFadeSec', state.loaderFadeSec);
       safeSetInput('gasTargetSeconds',    state.gasTargetSeconds);
       safeSetInput('gasTotalCycles',      state.gasTotalCycles);
       safeSetInput('gasDescentCycles',    state.gasDescentCycles);
@@ -1731,7 +1722,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     });
   });
 
-  ['chaseSpokes', 'chaseSpeed', 'loaderSpeed'].forEach(id => {
+  ['chaseSpokes', 'chaseSpeed', 'loaderSpeed', 'loaderFlashMs', 'loaderFadeSec'].forEach(id => {
     document.getElementById(id).addEventListener('change', e => {
       setParam(id, e.target.value);
     });
@@ -1757,6 +1748,10 @@ Preferences prefs;
 
 void loadConfig() {
   prefs.begin("ringcfg", true);
+  int savedVer = prefs.getInt("cfgVersion", 0);
+  if (savedVer != CONFIG_VERSION)
+    Serial.printf("[CFG] Schema version mismatch: stored=%d current=%d — new fields will use defaults.\n",
+                  savedVer, CONFIG_VERSION);
   ringName   = prefs.getString("ringName",   "Ring 1");
   micEnabled = prefs.getBool  ("micEnabled", false);
   phraseCount= prefs.getInt   ("phraseCount", 0);
@@ -1778,6 +1773,7 @@ void loadConfig() {
 
 void saveConfig() {
   prefs.begin("ringcfg", false);
+  prefs.putInt   ("cfgVersion",  CONFIG_VERSION);
   prefs.putString("ringName",    ringName);
   prefs.putBool  ("micEnabled",  micEnabled);
   prefs.putInt   ("phraseCount", phraseCount);
@@ -1849,17 +1845,12 @@ String runInference(int16_t* buf, size_t len) {
 }
 
 // ── Phrase trigger ────────────────────────────────────────
-void activateEffect(const String& effect, CRGB colour) {
-  currentEffect = effect;
+void activateEffect(const String& id, CRGB colour) {
   currentColor  = colour;
+  currentEffect = id;
   FastLED.setBrightness(brightness);
-  if (effect == "gaslight") {
-    gasCycleStart = millis(); gasWavePhase = 0.0f;
-    gasLastWaveMs = 0;        gasTransientActive = false;
-  } else if (effect == "solid") {
-    fill_solid(leds, NUM_LEDS, colour);
-    FastLED.show();
-  }
+  const EffectDef* e = findEffect(id);
+  if (e) { lastUpdate = 0; e->onActivate(); }
 }
 
 void triggerPhrase(const String& detected) {
@@ -1871,10 +1862,11 @@ void triggerPhrase(const String& detected) {
     activateEffect(phraseConfigs[i].effect,
                    CRGB(phraseConfigs[i].r, phraseConfigs[i].g, phraseConfigs[i].b));
     if (phraseConfigs[i].durationSec > 0) {
-      triggerActive   = true;
-      triggerStartMs  = millis();
-      triggerDuration = phraseConfigs[i].durationSec;
-      triggerReturn   = phraseConfigs[i].returnEffect;
+      triggerActive      = true;
+      triggerStartMs     = millis();
+      triggerDuration    = phraseConfigs[i].durationSec;
+      triggerReturn      = phraseConfigs[i].returnEffect;
+      triggerReturnColor = currentColor;  // save colour before trigger overwrites it
     }
     break;
   }
@@ -1884,7 +1876,7 @@ void checkTriggerExpiry() {
   if (!triggerActive) return;
   if (millis() - triggerStartMs >= (unsigned long)triggerDuration * 1000UL) {
     triggerActive = false;
-    activateEffect(triggerReturn, currentColor);
+    activateEffect(triggerReturn, triggerReturnColor);
     Serial.println("[MIC] Trigger expired, returning to idle effect.");
   }
 }
@@ -1913,6 +1905,21 @@ String colorToHex(const CRGB& c) {
   char buf[8];
   snprintf(buf, sizeof(buf), "#%02X%02X%02X", c.r, c.g, c.b);
   return String(buf);
+}
+
+// Escape a string for embedding inside a JSON "..." value
+String jsonStr(const String& s) {
+  String out;
+  out.reserve(s.length() + 4);
+  for (unsigned int i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if      (c == '"')  out += "\\\"";
+    else if (c == '\\') out += "\\\\";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else                out += c;
+  }
+  return out;
 }
 
 int safeRandomRange(int minVal, int maxVal) {
@@ -2011,162 +2018,204 @@ void runGaslightEffect() {
   FastLED.show();
 }
 
-// ── Effects ───────────────────────────────────────────────
+// ── Per-effect activate / render functions ────────────────
+
+void activateSolid() {
+  fill_solid(leds, NUM_LEDS, currentColor);
+  FastLED.setBrightness(brightness);
+  FastLED.show();
+}
+void renderSolid() {
+  unsigned long now = millis();
+  if (now - lastUpdate > 50) {   // 20 fps is plenty for a static colour
+    lastUpdate = now;
+    fill_solid(leds, NUM_LEDS, currentColor);
+    FastLED.show();
+  }
+}
+
+static float pulsePhaseC = 0.0f;
+void activatePulse() { pulsePhaseC = 0.0f; lastUpdate = 0; }
+void renderPulse() {
+  unsigned long now = millis();
+  if (now - lastUpdate > 16) {
+    lastUpdate = now;
+    pulsePhaseC += 0.05f;
+    uint8_t bright = (uint8_t)(127.5f + 127.5f * sinf(pulsePhaseC));
+    fill_solid(leds, NUM_LEDS, currentColor);
+    FastLED.setBrightness((uint8_t)map(bright, 0, 255, 10, brightness));
+    FastLED.show();
+  }
+}
+
+void activateRainbow() { rainbowHue = 0; lastUpdate = 0; }
+void renderRainbow() {
+  unsigned long now = millis();
+  if (now - lastUpdate > 20) {
+    lastUpdate = now;
+    rainbowHue += 2;
+    fill_rainbow(leds, NUM_LEDS, rainbowHue, 256 / NUM_LEDS);
+    FastLED.setBrightness(brightness);
+    FastLED.show();
+  }
+}
+
+void activateChase() { chasePos = 0; chaseRevStep = 0; chaseLitCount = 1; lastUpdate = 0; }
+void renderChase() {
+  unsigned long now = millis();
+  if (now - lastUpdate > (unsigned long)chaseSpeed) {
+    lastUpdate = now;
+    chasePos = (chasePos + 1) % NUM_LEDS;
+    if (chaseLitCount < NUM_LEDS) {
+      chaseRevStep++;
+      if (chaseRevStep >= NUM_LEDS) { chaseRevStep = 0; chaseLitCount++; }
+    }
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    int n = (chaseLitCount < NUM_LEDS) ? chaseLitCount : chaseSpokes;
+    for (int s = 0; s < n; s++) {
+      int idx = (chasePos + (int)round((float)s * NUM_LEDS / n)) % NUM_LEDS;
+      leds[idx] = currentColor;
+    }
+    FastLED.setBrightness(brightness);
+    FastLED.show();
+  }
+}
+
+void activateSparkle() { lastUpdate = 0; }
+void renderSparkle() {
+  unsigned long now = millis();
+  if (now - lastUpdate > 40) {
+    lastUpdate = now;
+    for (int i = 0; i < NUM_LEDS; i++) leds[i].nscale8(180);
+    leds[random(NUM_LEDS)] = currentColor;
+    FastLED.setBrightness(brightness);
+    FastLED.show();
+  }
+}
+
+void activateLoader() {
+  loaderBase = 1; loaderSweep = 1; loaderPhase = 0;
+  loaderFlashCount = 0; loaderFlashOn = false;
+  lastUpdate = 0;
+}
+void renderLoader() {
+  unsigned long now = millis();
+  if (loaderPhase == 0) {
+    if (now - lastUpdate > (unsigned long)loaderSpeed) {
+      lastUpdate = now;
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+      for (int i = 0; i < loaderSweep; i++) leds[i] = currentColor;
+      FastLED.setBrightness(brightness);
+      FastLED.show();
+      loaderSweep++;
+      if (loaderSweep > NUM_LEDS) {
+        loaderBase++;
+        if (loaderBase > NUM_LEDS) {
+          loaderPhase = 1; loaderFlashCount = 0; loaderFlashOn = true;
+          fill_solid(leds, NUM_LEDS, currentColor);
+          FastLED.setBrightness(brightness);
+          FastLED.show();
+          lastUpdate = now;
+        } else {
+          loaderSweep = loaderBase;
+        }
+      }
+    }
+  } else if (loaderPhase == 1) {
+    if (now - lastUpdate > (unsigned long)loaderFlashMs) {
+      lastUpdate    = now;
+      loaderFlashOn = !loaderFlashOn;
+      fill_solid(leds, NUM_LEDS, loaderFlashOn ? currentColor : CRGB::Black);
+      FastLED.setBrightness(brightness);
+      FastLED.show();
+      if (!loaderFlashOn) {
+        loaderFlashCount++;
+        if (loaderFlashCount >= 7) {
+          fill_solid(leds, NUM_LEDS, CRGB::Black);
+          FastLED.show();
+          loaderPhase = 2;
+          loaderFadeStart = now;
+        }
+      }
+    }
+  } else if (loaderPhase == 2) {
+    unsigned long elapsed     = now - loaderFadeStart;
+    unsigned long fadeDurMs   = (unsigned long)loaderFadeSec * 1000UL;
+    float t = (elapsed >= fadeDurMs) ? 1.0f : (float)elapsed / (float)fadeDurMs;
+    uint8_t g = (uint8_t)(t * 255.0f);
+    fill_solid(leds, NUM_LEDS, CRGB(0, g, 0));
+    FastLED.setBrightness(brightness);
+    FastLED.show();
+    if (t >= 1.0f) {
+      // Sequence complete — hand off to solid green
+      currentColor  = CRGB(0, 255, 0);
+      currentEffect = "solid";
+    }
+  }
+}
+
+void activateGaslight() {
+  gasCycleStart = millis(); gasWavePhase = 0.0f;
+  gasLastWaveMs = 0;        gasTransientActive = false;
+}
+void renderGaslight() { runGaslightEffect(); }
+
+void activateOff() { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
+void renderOff()   { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
+
+// ── Effect registry ───────────────────────────────────────
+struct EffectDef {
+  const char* id;
+  void (*onActivate)();
+  void (*onRender)();
+};
+
+const EffectDef EFFECTS[] = {
+  { "solid",      activateSolid,    renderSolid    },
+  { "pulse",      activatePulse,    renderPulse    },
+  { "rainbow",    activateRainbow,  renderRainbow  },
+  { "chase",      activateChase,    renderChase    },
+  { "sparkle",    activateSparkle,  renderSparkle  },
+  { "loader",     activateLoader,   renderLoader   },
+  { "gaslight",   activateGaslight, renderGaslight },
+  { "off_effect", activateOff,      renderOff      },
+};
+const int NUM_EFFECTS = (int)(sizeof(EFFECTS) / sizeof(EFFECTS[0]));
+
+const EffectDef* findEffect(const String& id) {
+  for (int i = 0; i < NUM_EFFECTS; i++)
+    if (id == EFFECTS[i].id) return &EFFECTS[i];
+  return nullptr;
+}
+
+// ── Effect dispatch ───────────────────────────────────────
 void applyEffect() {
   if (!ledPower) {
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
     return;
   }
-
-  unsigned long now = millis();
-
-  if (currentEffect == "solid") {
-    fill_solid(leds, NUM_LEDS, currentColor);
-    FastLED.setBrightness(brightness);
-    FastLED.show();
-
-  } else if (currentEffect == "pulse") {
-    if (now - lastUpdate > 16) {
-      lastUpdate = now;
-      static float phase = 0.0f;
-      phase += 0.05f;
-      uint8_t bright = (uint8_t)(127.5f + 127.5f * sinf(phase));
-      fill_solid(leds, NUM_LEDS, currentColor);
-      FastLED.setBrightness((uint8_t)map(bright, 0, 255, 10, brightness));
-      FastLED.show();
-    }
-
-  } else if (currentEffect == "rainbow") {
-    if (now - lastUpdate > 20) {
-      lastUpdate = now;
-      rainbowHue += 2;
-      fill_rainbow(leds, NUM_LEDS, rainbowHue, 256 / NUM_LEDS);
-      FastLED.setBrightness(brightness);
-      FastLED.show();
-    }
-
-  } else if (currentEffect == "chase") {
-    if (now - lastUpdate > (unsigned long)chaseSpeed) {
-      lastUpdate = now;
-      chasePos = (chasePos + 1) % NUM_LEDS;
-
-      // Build-up: add one spoke per full revolution until the ring is fully lit
-      if (chaseLitCount < NUM_LEDS) {
-        chaseRevStep++;
-        if (chaseRevStep >= NUM_LEDS) {
-          chaseRevStep = 0;
-          chaseLitCount++;
-        }
-      }
-
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-
-      // During build-up show chaseLitCount spokes; once full, hold at chaseSpokes
-      int n = (chaseLitCount < NUM_LEDS) ? chaseLitCount : chaseSpokes;
-      for (int s = 0; s < n; s++) {
-        int idx = (chasePos + (int)round((float)s * NUM_LEDS / n)) % NUM_LEDS;
-        leds[idx] = currentColor;
-      }
-
-      FastLED.setBrightness(brightness);
-      FastLED.show();
-    }
-
-  } else if (currentEffect == "sparkle") {
-    if (now - lastUpdate > 40) {
-      lastUpdate = now;
-      for (int i = 0; i < NUM_LEDS; i++) leds[i].nscale8(180);
-      leds[random(NUM_LEDS)] = currentColor;
-      FastLED.setBrightness(brightness);
-      FastLED.show();
-    }
-
-  } else if (currentEffect == "loader") {
-    if (loaderPhase == 0) {
-      // ── Build-up: revolutions of increasing base ─────────────
-      // Rev N starts with loaderBase LEDs lit (0..loaderBase-1),
-      // then loaderSweep advances to fill the rest one step at a time.
-      if (now - lastUpdate > (unsigned long)loaderSpeed) {
-        lastUpdate = now;
-        fill_solid(leds, NUM_LEDS, CRGB::Black);
-        for (int i = 0; i < loaderSweep; i++) leds[i] = currentColor;
-        FastLED.setBrightness(brightness);
-        FastLED.show();
-        loaderSweep++;
-        if (loaderSweep > NUM_LEDS) {
-          // Revolution complete — advance base for next revolution
-          loaderBase++;
-          if (loaderBase > NUM_LEDS) {
-            // All revolutions done → start flashing
-            loaderPhase      = 1;
-            loaderFlashCount = 0;
-            loaderFlashOn    = true;
-            fill_solid(leds, NUM_LEDS, currentColor);
-            FastLED.setBrightness(brightness);
-            FastLED.show();
-            lastUpdate = now;
-          } else {
-            loaderSweep = loaderBase; // next sweep starts from the new base
-          }
-        }
-      }
-
-    } else if (loaderPhase == 1) {
-      // ── Flash 7 times ─────────────────────────────────────────
-      if (now - lastUpdate > 200UL) {
-        lastUpdate    = now;
-        loaderFlashOn = !loaderFlashOn;
-        fill_solid(leds, NUM_LEDS, loaderFlashOn ? currentColor : CRGB::Black);
-        FastLED.setBrightness(brightness);
-        FastLED.show();
-        if (!loaderFlashOn) {
-          loaderFlashCount++;
-          if (loaderFlashCount >= 7) {
-            fill_solid(leds, NUM_LEDS, CRGB::Black);
-            FastLED.show();
-            loaderPhase   = 2;
-            loaderFadeStart = now;
-          }
-        }
-      }
-
-    } else if (loaderPhase == 2) {
-      // ── Fade in green over 21 s ───────────────────────────────
-      unsigned long elapsed = now - loaderFadeStart;
-      float t = (elapsed >= 21000UL) ? 1.0f : (float)elapsed / 21000.0f;
-      uint8_t g = (uint8_t)(t * 255.0f);
-      fill_solid(leds, NUM_LEDS, CRGB(0, g, 0));
-      FastLED.setBrightness(brightness);
-      FastLED.show();
-    }
-
-  } else if (currentEffect == "gaslight") {
-    runGaslightEffect();
-
-  } else if (currentEffect == "off_effect") {
-    fill_solid(leds, NUM_LEDS, CRGB::Black);
-    FastLED.show();
-  }
+  const EffectDef* e = findEffect(currentEffect);
+  if (e) e->onRender();
 }
 
 // ── Handlers ──────────────────────────────────────────────
 
 void handleGetConfig() {
   String json = "{";
-  json += "\"ringName\":\"" + ringName + "\",";
+  json += "\"ringName\":\"" + jsonStr(ringName) + "\",";
   json += "\"micEnabled\":" + String(micEnabled ? "true" : "false") + ",";
   json += "\"phrases\":[";
   for (int i = 0; i < phraseCount; i++) {
     if (i > 0) json += ",";
     json += "{";
-    json += "\"phrase\":\"" + phraseConfigs[i].phrase + "\",";
-    json += "\"effect\":\"" + phraseConfigs[i].effect + "\",";
-    json += "\"r\":"  + String(phraseConfigs[i].r) + ",";
-    json += "\"g\":"  + String(phraseConfigs[i].g) + ",";
-    json += "\"b\":"  + String(phraseConfigs[i].b) + ",";
-    json += "\"duration\":"     + String(phraseConfigs[i].durationSec) + ",";
-    json += "\"returnEffect\":\"" + phraseConfigs[i].returnEffect + "\"";
+    json += "\"phrase\":\""       + jsonStr(phraseConfigs[i].phrase)       + "\",";
+    json += "\"effect\":\""       + jsonStr(phraseConfigs[i].effect)       + "\",";
+    json += "\"r\":"              + String(phraseConfigs[i].r)             + ",";
+    json += "\"g\":"              + String(phraseConfigs[i].g)             + ",";
+    json += "\"b\":"              + String(phraseConfigs[i].b)             + ",";
+    json += "\"duration\":"       + String(phraseConfigs[i].durationSec)   + ",";
+    json += "\"returnEffect\":\"" + jsonStr(phraseConfigs[i].returnEffect) + "\"";
     json += "}";
   }
   json += "]}";
@@ -2254,43 +2303,24 @@ void handleColor() {
 
 void handleEffect() {
   if (server.hasArg("effect")) {
-    currentEffect = server.arg("effect");
-    lastUpdate = 0;
-
-    if (currentEffect == "chase") {
-      chasePos = 0; chaseRevStep = 0; chaseLitCount = 1;
-    } else if (currentEffect == "loader") {
-      loaderBase = 1; loaderSweep = 1; loaderPhase = 0; loaderFlashCount = 0; loaderFlashOn = false;
-    } else if (currentEffect == "solid") {
-      fill_solid(leds, NUM_LEDS, currentColor);
-      FastLED.setBrightness(brightness);
-      FastLED.show();
-    } else if (currentEffect == "off_effect") {
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-      FastLED.show();
-    } else if (currentEffect == "gaslight") {
-      gasCycleStart      = millis();
-      gasWavePhase       = 0.0f;
-      gasLastWaveMs      = 0;
-      gasTransientActive = false;
+    String id = server.arg("effect");
+    const EffectDef* e = findEffect(id);
+    if (e) {
+      currentEffect = id;
+      lastUpdate    = 0;
+      e->onActivate();
     }
   }
-
   server.send(200, "text/plain", currentEffect);
 }
 
-void handleSetParam() {
-  if (!server.hasArg("name") || !server.hasArg("value")) {
-    server.send(400, "text/plain", "Missing name/value");
-    return;
-  }
-
-  String name = server.arg("name");
-  int value = server.arg("value").toInt();
-
+// Shared param logic — returns false if name is unrecognised
+bool applyParam(const String& name, int value) {
   if      (name == "chaseSpokes")          { chaseSpokes = constrain(value, 1, NUM_LEDS); chaseLitCount = 1; chaseRevStep = 0; }
   else if (name == "chaseSpeed")           chaseSpeed           = constrain(value, 10, 500);
   else if (name == "loaderSpeed")          loaderSpeed          = constrain(value, 20, 1000);
+  else if (name == "loaderFlashMs")        loaderFlashMs        = constrain(value, 50, 2000);
+  else if (name == "loaderFadeSec")        loaderFadeSec        = constrain(value, 1, 300);
   else if (name == "gasTargetSeconds")     gasTargetSeconds     = max(1, value);
   else if (name == "gasTotalCycles")       gasTotalCycles       = max(1, value);
   else if (name == "gasDescentCycles")     gasDescentCycles     = constrain(value, 1, gasTotalCycles);
@@ -2300,11 +2330,33 @@ void handleSetParam() {
   else if (name == "gasDeepBrightnessMax") gasDeepBrightnessMax = constrain(value, 0, 255);
   else if (name == "gasVariation")         gasVariation         = constrain(value, 0, 50);
   else if (name == "gasWarnProbability")   gasWarnProbability   = constrain(value, 0, 100);
-  else {
+  else return false;
+  return true;
+}
+
+static unsigned long lastSetParamMs = 0;
+
+// Single-param endpoint (rate-limited)
+void handleSetParam() {
+  unsigned long now = millis();
+  if (now - lastSetParamMs < 50) { server.send(429, "text/plain", "Rate limit"); return; }
+  lastSetParamMs = now;
+
+  if (!server.hasArg("name") || !server.hasArg("value")) {
+    server.send(400, "text/plain", "Missing name/value");
+    return;
+  }
+  if (!applyParam(server.arg("name"), server.arg("value").toInt())) {
     server.send(400, "text/plain", "Unknown param");
     return;
   }
+  server.send(200, "text/plain", "OK");
+}
 
+// Multi-param atomic endpoint — apply all args in one request
+void handleSetParams() {
+  for (int i = 0; i < server.args(); i++)
+    applyParam(server.argName(i), server.arg(i).toInt());
   server.send(200, "text/plain", "OK");
 }
 
@@ -2338,12 +2390,15 @@ void handleGetStatus() {
 
   String json = "{";
   json += "\"power\":" + String(ledPower ? "true" : "false") + ",";
-  json += "\"effect\":\"" + currentEffect + "\",";
+  json += "\"effect\":\"" + jsonStr(currentEffect) + "\",";
   json += "\"brightness\":" + String(brightness) + ",";
   json += "\"color\":\"" + colorToHex(currentColor) + "\",";
-  json += "\"chaseSpokes\":" + String(chaseSpokes) + ",";
-  json += "\"chaseSpeed\":"  + String(chaseSpeed)  + ",";
-  json += "\"loaderSpeed\":" + String(loaderSpeed) + ",";
+  json += "\"chaseSpokes\":"  + String(chaseSpokes)  + ",";
+  json += "\"chaseSpeed\":"   + String(chaseSpeed)   + ",";
+  json += "\"loaderSpeed\":"  + String(loaderSpeed)  + ",";
+  json += "\"loaderFlashMs\":" + String(loaderFlashMs) + ",";
+  json += "\"loaderFadeSec\":" + String(loaderFadeSec) + ",";
+  json += "\"loaderPhase\":"  + String(loaderPhase)  + ",";
   json += "\"cycle\":" + String(gasCycleCounter) + ",";
   json += "\"totalCycles\":" + String(gasTotalCycles) + ",";
   json += "\"elapsed\":" + String(elapsed) + ",";
@@ -2403,6 +2458,7 @@ void setup() {
   server.on("/color",      handleColor);
   server.on("/effect",     handleEffect);
   server.on("/setParam",   handleSetParam);
+  server.on("/setParams",  handleSetParams);
   server.on("/gasControl", handleGasControl);
   server.on("/getStatus",  handleGetStatus);
   server.on("/config",     handleConfig);
