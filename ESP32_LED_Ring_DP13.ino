@@ -51,8 +51,13 @@ int chaseSpokes   = 8;   // target number of evenly-spaced spokes
 int chaseSpeed    = 60;  // ms per step
 int rainbowHue    = 0;
 
-int loaderCount   = 0;   // how many LEDs are currently lit
-int loaderSpeed   = 80;  // ms per LED step
+int  loaderSpeed      = 80;   // ms per LED step during build-up
+int  loaderBase       = 1;    // LEDs permanently lit at start of each revolution
+int  loaderSweep      = 1;    // current sweep position (index up to NUM_LEDS-1)
+int  loaderPhase      = 0;    // 0=buildup  1=flash  2=fadein
+int  loaderFlashCount = 0;    // number of on→off cycles completed
+bool loaderFlashOn    = false;
+unsigned long loaderFadeStart = 0;
 
 // ── Gaslight Parameters ───────────────────────────────────
 int gasMaxBrightness     = 255;
@@ -330,7 +335,7 @@ let state={power:true,color:'#4a8c3a',brightness:180,effect:'solid',
 let animLastTs=0,pulsePhase=0,rainbowHue=0;
 let chasePos=0,chaseLastTs=0;
 let sparkleLastTs=0,sparkleLevels=new Array(NUM_LEDS).fill(0);
-let loaderCountP=0,loaderLastTsP=0;
+let loaderBaseP=1,loaderSweepP=1,loaderLastTsP=0,loaderPhaseP=0,loaderFlashCountP=0,loaderFlashOnP=false,loaderFadeStartP=0;
 let gasPhase=0,gasTxActive=false,gasTxStart=0,gasTxDepth=0,gasTxCheck=0;
 function animLoop(ts){
   const dt=animLastTs?Math.min((ts-animLastTs)/1000,0.1):0.016;
@@ -365,8 +370,16 @@ function animLoop(ts){
     circles.forEach((c,i)=>c.setAttribute('fill',`rgb(${Math.round(cr*sparkleLevels[i])},${Math.round(cg*sparkleLevels[i])},${Math.round(cb*sparkleLevels[i])})`));
   } else if(state.effect==='loader'){
     const spd=state.loaderSpeed||80;
-    if(ts-loaderLastTsP>spd){loaderLastTsP=ts;loaderCountP++;if(loaderCountP>NUM_LEDS)loaderCountP=1;}
-    circles.forEach((c,i)=>c.setAttribute('fill',i<loaderCountP?`rgb(${cr},${cg},${cb})`:'#2a1a08'));
+    if(loaderPhaseP===0){
+      if(ts-loaderLastTsP>spd){loaderLastTsP=ts;loaderSweepP++;if(loaderSweepP>NUM_LEDS){loaderBaseP++;if(loaderBaseP>NUM_LEDS){loaderPhaseP=1;loaderFlashCountP=0;loaderFlashOnP=true;loaderLastTsP=ts;}else{loaderSweepP=loaderBaseP;}}}
+      circles.forEach((c,i)=>c.setAttribute('fill',i<loaderSweepP?`rgb(${cr},${cg},${cb})`:'#2a1a08'));
+    } else if(loaderPhaseP===1){
+      if(ts-loaderLastTsP>200){loaderLastTsP=ts;loaderFlashOnP=!loaderFlashOnP;if(!loaderFlashOnP){loaderFlashCountP++;if(loaderFlashCountP>=7){loaderPhaseP=2;loaderFadeStartP=ts;}}}
+      circles.forEach(c=>c.setAttribute('fill',loaderFlashOnP?`rgb(${cr},${cg},${cb})`:'#2a1a08'));
+    } else {
+      const g=Math.round(Math.min(1,(ts-loaderFadeStartP)/21000)*255);
+      circles.forEach(c=>c.setAttribute('fill',`rgb(0,${g},0)`));
+    }
   } else if(state.effect==='gaslight'){
     gasPhase+=Math.PI*2*1.5*dt;
     const dStart=state.descentStart;
@@ -1350,7 +1363,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
   let animLastTs = 0, pulsePhase = 0, rainbowHueJs = 0;
   let chasePos = 0, chaseLastTs = 0, chaseRevStep = 0, chaseLitCount = 1;
   let sparkleLastTs = 0, sparkleLevels = new Array(NUM_LEDS).fill(0);
-  let loaderCount = 0, loaderLastTs = 0;
+  let loaderBase = 1, loaderSweep = 1, loaderLastTs = 0;
+  let loaderPhase = 0, loaderFlashCount = 0, loaderFlashOn = false, loaderFadeStart = 0;
   let gasPhaseJs = 0, gasTxActive = false, gasTxStart = 0, gasTxDepth = 0, gasTxCheck = 0;
 
   // ── Animation Loop ───────────────────────────────────────
@@ -1358,7 +1372,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     if (effect === 'gaslight') { gasPhaseJs = 0; gasTxActive = false; }
     if (effect === 'chase')    { chasePos = 0; chaseLastTs = 0; chaseRevStep = 0; chaseLitCount = 1; }
     if (effect === 'sparkle')  { sparkleLevels.fill(0); sparkleLastTs = 0; }
-    if (effect === 'loader')   { loaderCount = 0; loaderLastTs = 0; }
+    if (effect === 'loader')   { loaderBase = 1; loaderSweep = 1; loaderLastTs = 0; loaderPhase = 0; loaderFlashCount = 0; loaderFlashOn = false; loaderFadeStart = 0; }
     if (effect === 'pulse')    { pulsePhase = 0; }
     if (effect === 'rainbow')  { rainbowHueJs = 0; }
   }
@@ -1418,14 +1432,34 @@ input[type="range"]::-webkit-slider-thumb:hover {
       });
     } else if (state.effect === 'loader') {
       const spd = state.loaderSpeed || 80;
-      if (ts - loaderLastTs > spd) {
-        loaderLastTs = ts;
-        loaderCount++;
-        if (loaderCount > NUM_LEDS) loaderCount = 1;
+      if (loaderPhase === 0) {
+        if (ts - loaderLastTs > spd) {
+          loaderLastTs = ts;
+          loaderSweep++;
+          if (loaderSweep > NUM_LEDS) {
+            loaderBase++;
+            if (loaderBase > NUM_LEDS) {
+              loaderPhase = 1; loaderFlashCount = 0; loaderFlashOn = true; loaderLastTs = ts;
+            } else {
+              loaderSweep = loaderBase;
+            }
+          }
+        }
+        circles.forEach((c, i) => c.setAttribute('fill', i < loaderSweep ? `rgb(${cr},${cg},${cb})` : '#2a1a08'));
+      } else if (loaderPhase === 1) {
+        if (ts - loaderLastTs > 200) {
+          loaderLastTs = ts;
+          loaderFlashOn = !loaderFlashOn;
+          if (!loaderFlashOn) {
+            loaderFlashCount++;
+            if (loaderFlashCount >= 7) { loaderPhase = 2; loaderFadeStart = ts; }
+          }
+        }
+        circles.forEach(c => c.setAttribute('fill', loaderFlashOn ? `rgb(${cr},${cg},${cb})` : '#2a1a08'));
+      } else {
+        const g = Math.round(Math.min(1, (ts - loaderFadeStart) / 21000) * 255);
+        circles.forEach(c => c.setAttribute('fill', `rgb(0,${g},0)`));
       }
-      circles.forEach((c, i) => {
-        c.setAttribute('fill', i < loaderCount ? `rgb(${cr},${cg},${cb})` : '#2a1a08');
-      });
     } else if (state.effect === 'gaslight') {
       gasPhaseJs += Math.PI * 2 * 1.5 * dt;
       const dStart = state.descentStart;
@@ -2049,14 +2083,60 @@ void applyEffect() {
     }
 
   } else if (currentEffect == "loader") {
-    if (now - lastUpdate > (unsigned long)loaderSpeed) {
-      lastUpdate = now;
-      loaderCount++;
-      if (loaderCount > NUM_LEDS) loaderCount = 1;
-      fill_solid(leds, NUM_LEDS, CRGB::Black);
-      for (int i = 0; i < loaderCount; i++) {
-        leds[i] = currentColor;
+    if (loaderPhase == 0) {
+      // ── Build-up: revolutions of increasing base ─────────────
+      // Rev N starts with loaderBase LEDs lit (0..loaderBase-1),
+      // then loaderSweep advances to fill the rest one step at a time.
+      if (now - lastUpdate > (unsigned long)loaderSpeed) {
+        lastUpdate = now;
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        for (int i = 0; i < loaderSweep; i++) leds[i] = currentColor;
+        FastLED.setBrightness(brightness);
+        FastLED.show();
+        loaderSweep++;
+        if (loaderSweep > NUM_LEDS) {
+          // Revolution complete — advance base for next revolution
+          loaderBase++;
+          if (loaderBase > NUM_LEDS) {
+            // All revolutions done → start flashing
+            loaderPhase      = 1;
+            loaderFlashCount = 0;
+            loaderFlashOn    = true;
+            fill_solid(leds, NUM_LEDS, currentColor);
+            FastLED.setBrightness(brightness);
+            FastLED.show();
+            lastUpdate = now;
+          } else {
+            loaderSweep = loaderBase; // next sweep starts from the new base
+          }
+        }
       }
+
+    } else if (loaderPhase == 1) {
+      // ── Flash 7 times ─────────────────────────────────────────
+      if (now - lastUpdate > 200UL) {
+        lastUpdate    = now;
+        loaderFlashOn = !loaderFlashOn;
+        fill_solid(leds, NUM_LEDS, loaderFlashOn ? currentColor : CRGB::Black);
+        FastLED.setBrightness(brightness);
+        FastLED.show();
+        if (!loaderFlashOn) {
+          loaderFlashCount++;
+          if (loaderFlashCount >= 7) {
+            fill_solid(leds, NUM_LEDS, CRGB::Black);
+            FastLED.show();
+            loaderPhase   = 2;
+            loaderFadeStart = now;
+          }
+        }
+      }
+
+    } else if (loaderPhase == 2) {
+      // ── Fade in green over 21 s ───────────────────────────────
+      unsigned long elapsed = now - loaderFadeStart;
+      float t = (elapsed >= 21000UL) ? 1.0f : (float)elapsed / 21000.0f;
+      uint8_t g = (uint8_t)(t * 255.0f);
+      fill_solid(leds, NUM_LEDS, CRGB(0, g, 0));
       FastLED.setBrightness(brightness);
       FastLED.show();
     }
@@ -2180,7 +2260,7 @@ void handleEffect() {
     if (currentEffect == "chase") {
       chasePos = 0; chaseRevStep = 0; chaseLitCount = 1;
     } else if (currentEffect == "loader") {
-      loaderCount = 0;
+      loaderBase = 1; loaderSweep = 1; loaderPhase = 0; loaderFlashCount = 0; loaderFlashOn = false;
     } else if (currentEffect == "solid") {
       fill_solid(leds, NUM_LEDS, currentColor);
       FastLED.setBrightness(brightness);
