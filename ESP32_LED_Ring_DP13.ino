@@ -920,6 +920,54 @@ input[type="range"]::-webkit-slider-thumb:hover {
   text-transform:uppercase;
   font-family:'Special Elite',serif;
 }
+
+/* ── Responsive layout ─────────────────────────────────── */
+
+/* Fluid base: never overflow on tiny screens */
+.page { max-width: min(520px, calc(100vw - 32px)); }
+
+/* Tablet: 600 px+ — wider card, bigger ring, 3-col effects, 2-col gas */
+@media (min-width: 600px) {
+  .page { max-width: 660px; }
+  .dossier { padding: 42px 40px 34px; }
+  .ring-svg { width: 172px; height: 172px; }
+  .header-title { font-size: 1.45rem; }
+  .effects-grid { grid-template-columns: repeat(3, 1fr); }
+  .gas-grid { grid-template-columns: 1fr 1fr; }
+  .gas-actions { grid-template-columns: repeat(3, 1fr); }
+  .colour-swatches { gap: 11px; }
+  .swatch { width: 32px; height: 32px; }
+}
+
+/* Desktop: 960 px+ — two-column dossier body */
+@media (min-width: 960px) {
+  .page { max-width: 1020px; }
+  .dossier { padding: 48px 48px 38px; }
+  .header-title { font-size: 1.65rem; }
+  .ring-svg { width: 210px; height: 210px; }
+  .dossier-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 40px;
+    align-items: start;
+  }
+  /* column dividers */
+  .dossier-col + .dossier-col {
+    border-left: 1px solid rgba(26,18,8,0.18);
+    padding-left: 40px;
+  }
+  .effects-grid { grid-template-columns: 1fr 1fr; }
+  .gas-grid { grid-template-columns: 1fr 1fr; }
+  .swatch { width: 34px; height: 34px; }
+}
+
+/* Scale-up font sizes smoothly between 320 and 960 px */
+@media (min-width: 480px) {
+  .field-label  { font-size: clamp(.54rem, 1.1vw, .65rem); }
+  .effect-btn   { font-size: clamp(.7rem,  1.3vw, .82rem); }
+  .gas-row label{ font-size: clamp(.68rem, 1.2vw, .78rem); }
+  .status-text  { font-size: clamp(.56rem, 1vw,  .65rem);  }
+}
 </style>
 </head>
 <body>
@@ -951,6 +999,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
         Field Unit Ref: <span class="redacted">███████</span> &nbsp;·&nbsp; Operative: <span class="redacted">████████████</span>
       </div>
     </div>
+
+    <div class="dossier-body"><div class="dossier-col">
 
     <div class="ring-section">
       <div class="ring-frame">
@@ -999,7 +1049,8 @@ input[type="range"]::-webkit-slider-thumb:hover {
       <span class="bright-val" id="brightnessVal">180</span>
     </div>
 
-    <hr class="divider">
+    </div><!-- /dossier-col left -->
+    <div class="dossier-col">
 
     <div class="field-label">Manifestation Protocol — Select Ritual</div>
     <div class="effects-grid">
@@ -1113,6 +1164,9 @@ input[type="range"]::-webkit-slider-thumb:hover {
       </div>
       <div class="status-right">DO NOT DISCUSS<br>WITH UNINITIATED</div>
     </div>
+
+    </div><!-- /dossier-col right -->
+    </div><!-- /dossier-body -->
 
   </div>
   <div class="footer-stamp">
