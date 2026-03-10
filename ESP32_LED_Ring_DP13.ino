@@ -14,6 +14,8 @@
 #include <WebServer.h>
 #include <FastLED.h>
 #include <math.h>
+#include <Preferences.h>
+#include <driver/i2s.h>
 
 // ── Configuration ─────────────────────────────────────────
 #define LED_PIN     13
@@ -23,6 +25,15 @@
 
 const char* WIFI_SSID = "2.4";
 const char* WIFI_PASS = "Xt_ew25rl!kqZrV";
+
+// ── INMP441 I2S Microphone Pins ───────────────────────────
+#define I2S_SCK_PIN   14
+#define I2S_WS_PIN    15
+#define I2S_SD_PIN    32
+#define I2S_MIC_PORT  I2S_NUM_0
+
+// ── Phrase Config ─────────────────────────────────────────
+#define MAX_PHRASES   5
 // ──────────────────────────────────────────────────────────
 
 CRGB leds[NUM_LEDS];
@@ -61,6 +72,140 @@ unsigned long gasTransientStart     = 0;
 int           gasTransientDepth     = 0;
 unsigned long gasLastTransientCheck = 0;
 // ──────────────────────────────────────────────────────────
+
+// ── Phrase Trigger Config ────────────────────────────────
+struct PhraseConfig {
+  String  phrase;
+  String  effect;        // "solid","gaslight","chase","rainbow","off_effect"
+  uint8_t r, g, b;
+  int     durationSec;   // 0 = stay until manually changed
+  String  returnEffect;  // effect to restore after durationSec
+};
+
+String       ringName     = "Ring 1";
+bool         micEnabled   = false;
+bool         micInitDone  = false;
+PhraseConfig phraseConfigs[MAX_PHRASES];
+int          phraseCount  = 0;
+
+// ── Trigger State ─────────────────────────────────────────
+bool          triggerActive   = false;
+unsigned long triggerStartMs  = 0;
+int           triggerDuration = 0;
+String        triggerReturn   = "gaslight";
+
+// ── Mic Sample Buffer ────────────────────────────────────
+#define MIC_BUFFER_SIZE 16000          // 1 s at 16 kHz
+static int16_t micBuffer[MIC_BUFFER_SIZE];
+static int     micBufferPos = 0;
+// ──────────────────────────────────────────────────────────
+
+// ── Config Page ───────────────────────────────────────────
+const char CONFIG_PAGE[] PROGMEM = R"===(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Ring Config</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&display=swap');
+:root{--void:#080508;--parchment:#c8b89a;--green-lit:#7aba5a;--green-dim:#4a7a3a;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--void);color:var(--parchment);font-family:'Courier Prime',monospace;min-height:100vh;padding:24px 16px;max-width:740px;margin:0 auto;}
+a{color:var(--green-lit);text-decoration:none;}a:hover{text-decoration:underline;}
+h1{font-size:1rem;letter-spacing:.22em;text-transform:uppercase;color:var(--green-lit);margin-bottom:22px;}
+h2{font-size:.68rem;letter-spacing:.2em;text-transform:uppercase;color:rgba(200,184,154,.45);margin-bottom:10px;}
+section{border:1px solid rgba(74,122,58,.28);padding:14px 16px;margin-bottom:14px;border-radius:4px;}
+label{display:flex;flex-direction:column;gap:3px;font-size:.78rem;margin-bottom:8px;}
+input[type=text],input[type=number]{background:rgba(255,255,255,.05);border:1px solid rgba(200,184,154,.22);color:var(--parchment);padding:5px 8px;font-family:inherit;font-size:.8rem;border-radius:3px;}
+input[type=text]{width:100%;}input[type=number]{width:64px;}
+select{background:#110e0d;border:1px solid rgba(200,184,154,.22);color:var(--parchment);padding:5px 8px;font-family:inherit;font-size:.8rem;border-radius:3px;}
+input[type=color]{width:34px;height:26px;padding:1px;border:1px solid rgba(200,184,154,.22);background:transparent;border-radius:3px;cursor:pointer;vertical-align:middle;}
+.toggle-row{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:.8rem;margin-bottom:4px;}
+input[type=checkbox]{width:15px;height:15px;accent-color:var(--green-lit);cursor:pointer;}
+.note{font-size:.68rem;color:rgba(200,184,154,.42);margin-top:5px;line-height:1.5;}
+.phrase-row{padding:10px 0;border-bottom:1px solid rgba(200,184,154,.08);display:flex;gap:10px;align-items:flex-start;}
+.phrase-row:last-child{border-bottom:none;}
+.row-num{font-size:.7rem;color:rgba(200,184,154,.35);min-width:16px;padding-top:7px;}
+.phrase-inner{flex:1;display:flex;flex-direction:column;gap:6px;}
+.ctrl-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.72rem;color:rgba(200,184,154,.5);}
+.rgb-row{display:flex;gap:6px;align-items:center;font-size:.72rem;color:rgba(200,184,154,.5);}
+.rgb-row label{flex-direction:row;align-items:center;gap:3px;margin:0;}
+button[type=submit]{background:rgba(74,122,58,.28);border:1px solid var(--green-dim);color:var(--green-lit);padding:9px 22px;font-family:inherit;font-size:.85rem;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;border-radius:3px;margin-top:6px;}
+button[type=submit]:hover{background:rgba(74,122,58,.48);}
+#status{margin-top:10px;font-size:.82rem;min-height:1.2em;}
+.back{font-size:.72rem;letter-spacing:.1em;display:inline-block;margin-bottom:18px;}
+</style>
+</head>
+<body>
+<a class="back" href="/">&#8592; Control Panel</a>
+<h1>Ring Configuration</h1>
+<form id="configForm">
+  <section>
+    <h2>Identity</h2>
+    <label>Ring Name
+      <input type="text" id="ringName" name="ringName" maxlength="32" placeholder="Ring 1">
+    </label>
+  </section>
+  <section>
+    <h2>Microphone</h2>
+    <div class="toggle-row">
+      <input type="checkbox" id="micEnabled">
+      <span>Enable INMP441 I2S Microphone</span>
+    </div>
+    <p class="note">Wiring: SCK&#8594;GPIO14 &nbsp; WS&#8594;GPIO15 &nbsp; SD&#8594;GPIO32 &nbsp; L/R&#8594;GND</p>
+    <p class="note">Phrase detection requires an Edge Impulse model &#8212; train at edgeimpulse.com and export as Arduino library.</p>
+  </section>
+  <section>
+    <h2>Phrase Triggers</h2>
+    <p class="note" style="margin-bottom:12px;">When a phrase is detected the ring switches to the chosen effect and colour. Leave blank to disable a slot.</p>
+    <div id="phraseList"></div>
+  </section>
+  <button type="submit">Save Configuration</button>
+</form>
+<div id="status"></div>
+<script>
+function rgbToHex(r,g,b){return'#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');}
+function hexToRgb(h){return{r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16)};}
+function syncRGB(i){const{r,g,b}=hexToRgb(document.getElementById('col'+i).value);document.querySelector('[name=r'+i+']').value=r;document.querySelector('[name=g'+i+']').value=g;document.querySelector('[name=b'+i+']').value=b;}
+function syncPicker(i){document.getElementById('col'+i).value=rgbToHex(+document.querySelector('[name=r'+i+']').value,+document.querySelector('[name=g'+i+']').value,+document.querySelector('[name=b'+i+']').value);}
+function eff(list,sel){return list.map(e=>'<option value="'+e+'"'+(e===sel?' selected':'')+'>'+e+'</option>').join('');}
+function buildRow(i,p){
+  const effs=['solid','gaslight','chase','rainbow','off_effect'];
+  const hex=rgbToHex(p.r||255,p.g||255,p.b||255);
+  return'<div class="phrase-row"><span class="row-num">'+( i+1)+'</span><div class="phrase-inner">'+
+    '<input type="text" name="phrase'+i+'" placeholder="e.g. The Abbey" value="'+(p.phrase||'')+'">'+
+    '<div class="ctrl-row">Effect:<select name="effect'+i+'">'+eff(effs,p.effect||'solid')+'</select>'+
+    'Duration:<input type="number" name="dur'+i+'" min="0" max="3600" value="'+(p.duration||10)+'">s'+
+    'then:<select name="ret'+i+'">'+eff(effs,p.returnEffect||'gaslight')+'</select></div>'+
+    '<div class="rgb-row"><input type="color" id="col'+i+'" value="'+hex+'" oninput="syncRGB('+i+')">'+
+    '<label>R<input type="number" name="r'+i+'" min="0" max="255" value="'+(p.r||255)+'" oninput="syncPicker('+i+')"></label>'+
+    '<label>G<input type="number" name="g'+i+'" min="0" max="255" value="'+(p.g||255)+'" oninput="syncPicker('+i+')"></label>'+
+    '<label>B<input type="number" name="b'+i+'" min="0" max="255" value="'+(p.b||255)+'" oninput="syncPicker('+i+')"></label></div>'+
+    '</div></div>';}
+async function loadConfig(){
+  try{
+    const cfg=await(await fetch('/getConfig')).json();
+    document.getElementById('ringName').value=cfg.ringName||'';
+    document.getElementById('micEnabled').checked=!!cfg.micEnabled;
+    const list=document.getElementById('phraseList');list.innerHTML='';
+    for(let i=0;i<5;i++){list.innerHTML+=buildRow(i,(cfg.phrases&&cfg.phrases[i])||{});}
+  }catch(e){console.error(e);}
+}
+document.getElementById('configForm').addEventListener('submit',async function(e){
+  e.preventDefault();
+  const fd=new FormData(this);fd.set('micEnabled',document.getElementById('micEnabled').checked?'1':'0');
+  const res=await fetch('/saveConfig',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(fd).toString()});
+  const st=document.getElementById('status');
+  st.style.color=res.ok?'#7aba5a':'#c04040';st.textContent=res.ok?'Configuration saved.':'Save failed.';
+  setTimeout(()=>st.textContent='',4000);
+});
+loadConfig();
+</script>
+</body>
+</html>
+)===";
 
 // ── Player / Observer Page ────────────────────────────────
 const char PLAYER_PAGE[] PROGMEM = R"===(
@@ -971,6 +1116,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
   </div>
   <div class="footer-stamp">
     Miskatonic University Applied Sciences Div. — <span class="redacted">██████████</span> — 1943
+    &nbsp;&nbsp;|&nbsp;&nbsp;<a href="/config" style="color:rgba(200,184,154,.4);font-size:.65rem;letter-spacing:.1em;text-decoration:none;">&#9881; Config</a>
   </div>
 </div>
 
@@ -1382,6 +1528,163 @@ input[type="range"]::-webkit-slider-thumb:hover {
 )===";
 
 // ── Utilities ─────────────────────────────────────────────
+// ── Preferences helpers ───────────────────────────────────
+Preferences prefs;
+
+void loadConfig() {
+  prefs.begin("ringcfg", true);
+  ringName   = prefs.getString("ringName",   "Ring 1");
+  micEnabled = prefs.getBool  ("micEnabled", false);
+  phraseCount= prefs.getInt   ("phraseCount", 0);
+  if (phraseCount > MAX_PHRASES) phraseCount = MAX_PHRASES;
+  for (int i = 0; i < phraseCount; i++) {
+    String px = "p" + String(i);
+    phraseConfigs[i].phrase       = prefs.getString((px+"phr").c_str(), "");
+    phraseConfigs[i].effect       = prefs.getString((px+"eff").c_str(), "solid");
+    phraseConfigs[i].r            = (uint8_t)prefs.getInt((px+"r").c_str(), 255);
+    phraseConfigs[i].g            = (uint8_t)prefs.getInt((px+"g").c_str(), 255);
+    phraseConfigs[i].b            = (uint8_t)prefs.getInt((px+"b").c_str(), 255);
+    phraseConfigs[i].durationSec  = prefs.getInt((px+"dur").c_str(), 10);
+    phraseConfigs[i].returnEffect = prefs.getString((px+"ret").c_str(), "gaslight");
+  }
+  prefs.end();
+  Serial.printf("[CFG] Loaded: name=%s mic=%d phrases=%d\n",
+                ringName.c_str(), micEnabled, phraseCount);
+}
+
+void saveConfig() {
+  prefs.begin("ringcfg", false);
+  prefs.putString("ringName",    ringName);
+  prefs.putBool  ("micEnabled",  micEnabled);
+  prefs.putInt   ("phraseCount", phraseCount);
+  for (int i = 0; i < phraseCount; i++) {
+    String px = "p" + String(i);
+    prefs.putString((px+"phr").c_str(), phraseConfigs[i].phrase);
+    prefs.putString((px+"eff").c_str(), phraseConfigs[i].effect);
+    prefs.putInt   ((px+"r").c_str(),   phraseConfigs[i].r);
+    prefs.putInt   ((px+"g").c_str(),   phraseConfigs[i].g);
+    prefs.putInt   ((px+"b").c_str(),   phraseConfigs[i].b);
+    prefs.putInt   ((px+"dur").c_str(), phraseConfigs[i].durationSec);
+    prefs.putString((px+"ret").c_str(), phraseConfigs[i].returnEffect);
+  }
+  prefs.end();
+  Serial.printf("[CFG] Saved: name=%s mic=%d phrases=%d\n",
+                ringName.c_str(), micEnabled, phraseCount);
+}
+
+// ── INMP441 I2S init ──────────────────────────────────────
+void micInit() {
+  i2s_config_t cfg = {
+    .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate          = 16000,
+    .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count        = 8,
+    .dma_buf_len          = 64,
+    .use_apll             = false,
+    .tx_desc_auto_clear   = false,
+    .fixed_mclk           = 0
+  };
+  i2s_pin_config_t pins = {
+    .bck_io_num   = I2S_SCK_PIN,
+    .ws_io_num    = I2S_WS_PIN,
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num  = I2S_SD_PIN
+  };
+  i2s_driver_install(I2S_MIC_PORT, &cfg, 0, NULL);
+  i2s_set_pin(I2S_MIC_PORT, &pins);
+  micInitDone = true;
+  Serial.println("[MIC] INMP441 initialised (SCK=14 WS=15 SD=32).");
+}
+
+// ── Edge Impulse inference stub ───────────────────────────
+// When your model is ready:
+//   1. Train phrases on edgeimpulse.com
+//   2. Export as "Arduino library" and install via Sketch > Include Library > Add .ZIP
+//   3. Add:  #include <your_project_inferencing.h>
+//   4. Replace the stub body with the commented code below
+//
+String runInference(int16_t* buf, size_t len) {
+  (void)buf; (void)len;
+  // --- Uncomment after adding your Edge Impulse library ---
+  // signal_t signal;
+  // numpy::signal_from_buffer(buf, len, &signal);
+  // ei_impulse_result_t result = { 0 };
+  // EI_IMPULSE_ERROR err = run_classifier(&signal, &result, false);
+  // if (err != EI_IMPULSE_OK) return "";
+  // float best = 0.7f;  int bestIdx = -1;  // 0.7 confidence threshold
+  // for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+  //   if (result.classification[i].value > best) {
+  //     best = result.classification[i].value;  bestIdx = (int)i;
+  //   }
+  // }
+  // if (bestIdx >= 0) return String(ei_classifier_inferencing_categories[bestIdx]);
+  return "";  // no detection until EI library is added
+}
+
+// ── Phrase trigger ────────────────────────────────────────
+void activateEffect(const String& effect, CRGB colour) {
+  currentEffect = effect;
+  currentColor  = colour;
+  FastLED.setBrightness(brightness);
+  if (effect == "gaslight") {
+    gasCycleStart = millis(); gasWavePhase = 0.0f;
+    gasLastWaveMs = 0;        gasTransientActive = false;
+  } else if (effect == "solid") {
+    fill_solid(leds, NUM_LEDS, colour);
+    FastLED.show();
+  }
+}
+
+void triggerPhrase(const String& detected) {
+  for (int i = 0; i < phraseCount; i++) {
+    if (phraseConfigs[i].phrase.length() == 0) continue;
+    if (!detected.equalsIgnoreCase(phraseConfigs[i].phrase)) continue;
+    Serial.printf("[MIC] Matched: \"%s\" -> %s\n",
+                  phraseConfigs[i].phrase.c_str(), phraseConfigs[i].effect.c_str());
+    activateEffect(phraseConfigs[i].effect,
+                   CRGB(phraseConfigs[i].r, phraseConfigs[i].g, phraseConfigs[i].b));
+    if (phraseConfigs[i].durationSec > 0) {
+      triggerActive   = true;
+      triggerStartMs  = millis();
+      triggerDuration = phraseConfigs[i].durationSec;
+      triggerReturn   = phraseConfigs[i].returnEffect;
+    }
+    break;
+  }
+}
+
+void checkTriggerExpiry() {
+  if (!triggerActive) return;
+  if (millis() - triggerStartMs >= (unsigned long)triggerDuration * 1000UL) {
+    triggerActive = false;
+    activateEffect(triggerReturn, currentColor);
+    Serial.println("[MIC] Trigger expired, returning to idle effect.");
+  }
+}
+
+// ── Mic sampling loop ────────────────────────────────────
+void handleMicLoop() {
+  if (!micEnabled || !micInitDone) return;
+  int16_t chunk[256];
+  size_t  bytesRead = 0;
+  i2s_read(I2S_MIC_PORT, chunk, sizeof(chunk), &bytesRead, 10 / portTICK_PERIOD_MS);
+  size_t n = bytesRead / sizeof(int16_t);
+  for (size_t i = 0; i < n && micBufferPos < MIC_BUFFER_SIZE; i++)
+    micBuffer[micBufferPos++] = chunk[i];
+  if (micBufferPos >= MIC_BUFFER_SIZE) {
+    String detected = runInference(micBuffer, MIC_BUFFER_SIZE);
+    if (detected.length() > 0) triggerPhrase(detected);
+    // Slide window by half for overlap
+    memcpy(micBuffer, micBuffer + MIC_BUFFER_SIZE / 2,
+           (MIC_BUFFER_SIZE / 2) * sizeof(int16_t));
+    micBufferPos = MIC_BUFFER_SIZE / 2;
+  }
+}
+// ──────────────────────────────────────────────────────────
+
 String colorToHex(const CRGB& c) {
   char buf[8];
   snprintf(buf, sizeof(buf), "#%02X%02X%02X", c.r, c.g, c.b);
@@ -1556,6 +1859,57 @@ void applyEffect() {
 }
 
 // ── Handlers ──────────────────────────────────────────────
+
+void handleGetConfig() {
+  String json = "{";
+  json += "\"ringName\":\"" + ringName + "\",";
+  json += "\"micEnabled\":" + String(micEnabled ? "true" : "false") + ",";
+  json += "\"phrases\":[";
+  for (int i = 0; i < phraseCount; i++) {
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"phrase\":\"" + phraseConfigs[i].phrase + "\",";
+    json += "\"effect\":\"" + phraseConfigs[i].effect + "\",";
+    json += "\"r\":"  + String(phraseConfigs[i].r) + ",";
+    json += "\"g\":"  + String(phraseConfigs[i].g) + ",";
+    json += "\"b\":"  + String(phraseConfigs[i].b) + ",";
+    json += "\"duration\":"     + String(phraseConfigs[i].durationSec) + ",";
+    json += "\"returnEffect\":\"" + phraseConfigs[i].returnEffect + "\"";
+    json += "}";
+  }
+  json += "]}";
+  server.send(200, "application/json", json);
+}
+
+void handleConfig() {
+  server.send_P(200, "text/html", CONFIG_PAGE);
+}
+
+void handleSaveConfig() {
+  if (server.hasArg("ringName"))   ringName   = server.arg("ringName");
+  if (server.hasArg("micEnabled")) micEnabled = server.arg("micEnabled").toInt() == 1;
+
+  phraseCount = 0;
+  for (int i = 0; i < MAX_PHRASES; i++) {
+    String pKey = "phrase" + String(i);
+    if (!server.hasArg(pKey) || server.arg(pKey).length() == 0) continue;
+    phraseConfigs[phraseCount].phrase       = server.arg(pKey);
+    phraseConfigs[phraseCount].effect       = server.hasArg("effect"+String(i)) ? server.arg("effect"+String(i)) : "solid";
+    phraseConfigs[phraseCount].r            = server.hasArg("r"+String(i))      ? (uint8_t)server.arg("r"+String(i)).toInt()   : 255;
+    phraseConfigs[phraseCount].g            = server.hasArg("g"+String(i))      ? (uint8_t)server.arg("g"+String(i)).toInt()   : 255;
+    phraseConfigs[phraseCount].b            = server.hasArg("b"+String(i))      ? (uint8_t)server.arg("b"+String(i)).toInt()   : 255;
+    phraseConfigs[phraseCount].durationSec  = server.hasArg("dur"+String(i))    ? server.arg("dur"+String(i)).toInt()           : 10;
+    phraseConfigs[phraseCount].returnEffect = server.hasArg("ret"+String(i))    ? server.arg("ret"+String(i))                   : "gaslight";
+    phraseCount++;
+  }
+
+  saveConfig();
+
+  if (micEnabled && !micInitDone) micInit();
+
+  server.send(200, "text/plain", "OK");
+}
+
 void handlePlayer() {
   server.send_P(200, "text/html", PLAYER_PAGE);
 }
@@ -1711,6 +2065,8 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
+  loadConfig();
+
   randomSeed(micros());
 
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
@@ -1738,18 +2094,23 @@ void setup() {
   Serial.print("Connected! Open: http://");
   Serial.println(WiFi.localIP());
 
-  server.on("/",          handleRoot);
-  server.on("/player",    handlePlayer);
-  server.on("/ping",      handlePing);
-  server.on("/power",     handlePower);
-  server.on("/color",     handleColor);
-  server.on("/effect",    handleEffect);
-  server.on("/setParam",  handleSetParam);
+  server.on("/",           handleRoot);
+  server.on("/player",     handlePlayer);
+  server.on("/ping",       handlePing);
+  server.on("/power",      handlePower);
+  server.on("/color",      handleColor);
+  server.on("/effect",     handleEffect);
+  server.on("/setParam",   handleSetParam);
   server.on("/gasControl", handleGasControl);
-  server.on("/getStatus", handleGetStatus);
+  server.on("/getStatus",  handleGetStatus);
+  server.on("/config",     handleConfig);
+  server.on("/getConfig",  handleGetConfig);
+  server.on("/saveConfig", HTTP_POST, handleSaveConfig);
 
   server.begin();
   Serial.println("Web server started.");
+
+  if (micEnabled) micInit();
 
   gasCycleStart = millis();
 
@@ -1766,5 +2127,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  checkTriggerExpiry();
+  handleMicLoop();
   applyEffect();
 }
