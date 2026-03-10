@@ -38,23 +38,238 @@ int chasePos = 0;
 int rainbowHue = 0;
 
 // ── Gaslight Parameters ───────────────────────────────────
-int gasMaxBrightness   = 255;
-int gasMinBrightness   = 190;
-int gasDeepBrightness  = 15;
+int gasMaxBrightness     = 255;
+int gasMinBrightness     = 190;
+int gasDeepBrightnessMin = 5;
+int gasDeepBrightnessMax = 25;
 
-int gasTargetSeconds   = 777;
-int gasTotalCycles     = 7;
-int gasCycleCounter    = 1;
+int gasTargetSeconds     = 777;
+int gasTotalCycles       = 7;
+int gasCycleCounter      = 1;
+int gasDescentCycles     = 2;   // final N cycles fade down gradually
+int gasVariation         = 15;  // per-LED brightness variation 0–50
+int gasWarnProbability   = 10;  // % chance per 100 ms of a pre-descent dip
 
-int gasNormalDelayMin  = 30;
-int gasNormalDelayMax  = 120;
-int gasDeepDelayMin    = 100;
-int gasDeepDelayMax    = 400;
-
-bool gasCycleRunning   = true;
+bool gasCycleRunning    = true;
 unsigned long gasCycleStart = 0;
-unsigned long gasNextFlickerAt = 0;
+
+// ── Gaslight Wave State ───────────────────────────────────
+float         gasWavePhase          = 0.0f;
+unsigned long gasLastWaveMs         = 0;
+bool          gasTransientActive    = false;
+unsigned long gasTransientStart     = 0;
+int           gasTransientDepth     = 0;
+unsigned long gasLastTransientCheck = 0;
 // ──────────────────────────────────────────────────────────
+
+// ── Player / Observer Page ────────────────────────────────
+const char PLAYER_PAGE[] PROGMEM = R"===(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>OSS — Observer Port</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap');
+:root { --void:#080508; --parchment:#c8b89a; --green-glow:#4a7a3a; --green-lit:#7aba5a; --blood:#6b1010; --ink-faded:#3a2e1a; }
+*{box-sizing:border-box;margin:0;padding:0;}
+body{
+  background:var(--void);
+  min-height:100vh;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  font-family:'Courier Prime',monospace;
+  gap:20px;
+  padding:20px;
+}
+body::before{
+  content:'';position:fixed;inset:0;
+  background:radial-gradient(ellipse at 50% 50%,rgba(26,42,10,0.4) 0%,transparent 65%);
+  pointer-events:none;z-index:0;
+}
+.observer-frame{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:18px;}
+.header-txt{font-size:.5rem;letter-spacing:.2em;color:rgba(200,184,154,.28);text-transform:uppercase;text-align:center;}
+.ring-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;}
+.ring-wrap::before{
+  content:'SIGNAL APERTURE';
+  position:absolute;top:-18px;left:50%;transform:translateX(-50%);
+  font-size:.46rem;letter-spacing:.22em;color:rgba(200,184,154,.3);white-space:nowrap;
+}
+.ring-outer-obs{
+  position:absolute;inset:-10px;
+  border:1px dashed rgba(200,184,154,.15);border-radius:50%;
+}
+#ringSvgP{width:200px;height:200px;transition:filter .5s;}
+.effect-label{
+  font-size:.6rem;letter-spacing:.2em;
+  color:rgba(200,184,154,.65);text-transform:uppercase;text-align:center;
+}
+.status-row{display:flex;align-items:center;gap:8px;}
+.status-dot{
+  width:7px;height:7px;border-radius:50%;
+  background:var(--blood);box-shadow:0 0 4px var(--blood);
+  transition:all .4s;
+}
+.status-dot.online{
+  background:var(--green-lit);box-shadow:0 0 8px var(--green-glow);
+  animation:blink 3s ease-in-out infinite;
+}
+@keyframes blink{0%,90%,100%{opacity:1}95%{opacity:.3}}
+.status-txt{font-size:.5rem;letter-spacing:.14em;color:rgba(200,184,154,.35);text-transform:uppercase;}
+.phase-badge{
+  font-size:.5rem;letter-spacing:.16em;
+  color:rgba(200,184,154,.4);text-transform:uppercase;
+  border:1px solid rgba(200,184,154,.12);
+  padding:3px 10px;
+}
+</style>
+</head>
+<body>
+<div class="observer-frame">
+  <div class="header-txt">OSS Occult Div. &mdash; Observer Port</div>
+  <div class="ring-wrap">
+    <div class="ring-outer-obs"></div>
+    <svg id="ringSvgP" viewBox="0 0 160 160">
+      <defs>
+        <filter id="ledGlowP">
+          <feGaussianBlur stdDeviation="2.5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g id="ticksP" stroke="rgba(200,184,154,0.1)" stroke-width="1"></g>
+      <g id="ringDotsP" filter="url(#ledGlowP)"></g>
+    </svg>
+  </div>
+  <div class="effect-label" id="effectLabelP">&mdash;</div>
+  <div class="phase-badge" id="phaseBadgeP">STANDBY</div>
+  <div class="status-row">
+    <div class="status-dot" id="statusDotP"></div>
+    <div class="status-txt" id="statusTxtP">AWAITING FIELD UNIT...</div>
+  </div>
+</div>
+<script>
+const NUM_LEDS=24,CX=80,CY=80,R_LED=62,DOT_R=6.5;
+const tickG=document.getElementById('ticksP');
+for(let i=0;i<48;i++){
+  const a=(i/48)*2*Math.PI-Math.PI/2,r1=74,r2=(i%3===0)?69:72;
+  const l=document.createElementNS('http://www.w3.org/2000/svg','line');
+  l.setAttribute('x1',(CX+r1*Math.cos(a)).toFixed(2));l.setAttribute('y1',(CY+r1*Math.sin(a)).toFixed(2));
+  l.setAttribute('x2',(CX+r2*Math.cos(a)).toFixed(2));l.setAttribute('y2',(CY+r2*Math.sin(a)).toFixed(2));
+  tickG.appendChild(l);
+}
+const ringDotsP=document.getElementById('ringDotsP');
+const circles=[];
+for(let i=0;i<NUM_LEDS;i++){
+  const angle=(i/NUM_LEDS)*2*Math.PI-Math.PI/2;
+  const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+  c.setAttribute('cx',(CX+R_LED*Math.cos(angle)).toFixed(2));
+  c.setAttribute('cy',(CY+R_LED*Math.sin(angle)).toFixed(2));
+  c.setAttribute('r',DOT_R);c.setAttribute('fill','#4a8c3a');
+  circles.push(c);ringDotsP.appendChild(c);
+}
+const EFFECT_NAMES={solid:'Steady Glow',pulse:'Heartbeat',rainbow:'Prismatic Rift',
+  chase:'Elder Sign Chase',sparkle:'Spectral Flicker',gaslight:'Gaslight Vigil',off_effect:'Extinguished'};
+let state={power:true,color:'#4a8c3a',brightness:180,effect:'solid',
+  gasCycle:1,gasTotalCycles:7,gasMinBrightness:190,gasMaxBrightness:255,
+  gasDeepBrightnessMin:5,gasDeepBrightnessMax:25,gasDescentCycles:2,
+  gasVariation:15,gasWarnProbability:10,descentStart:6};
+let animLastTs=0,pulsePhase=0,rainbowHue=0;
+let chasePos=0,chaseLastTs=0;
+let sparkleLastTs=0,sparkleLevels=new Array(NUM_LEDS).fill(0);
+let gasPhase=0,gasTxActive=false,gasTxStart=0,gasTxDepth=0,gasTxCheck=0;
+function animLoop(ts){
+  const dt=animLastTs?Math.min((ts-animLastTs)/1000,0.1):0.016;
+  animLastTs=ts;
+  const cr=parseInt(state.color.slice(1,3),16);
+  const cg=parseInt(state.color.slice(3,5),16);
+  const cb=parseInt(state.color.slice(5,7),16);
+  if(!state.power||state.effect==='off_effect'){
+    circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
+  } else if(state.effect==='solid'){
+    circles.forEach(c=>c.setAttribute('fill',state.color));
+  } else if(state.effect==='pulse'){
+    pulsePhase+=0.05;
+    const s=0.04+Math.max(0,0.5+0.5*Math.sin(pulsePhase))*0.96;
+    const f=`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`;
+    circles.forEach(c=>c.setAttribute('fill',f));
+  } else if(state.effect==='rainbow'){
+    rainbowHue=(rainbowHue+2)%360;
+    circles.forEach((c,i)=>c.setAttribute('fill',`hsl(${(rainbowHue+i*(360/NUM_LEDS))%360},80%,42%)`));
+  } else if(state.effect==='chase'){
+    if(ts-chaseLastTs>60){chaseLastTs=ts;chasePos=(chasePos+1)%NUM_LEDS;}
+    circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
+    circles[chasePos].setAttribute('fill',`rgb(${cr},${cg},${cb})`);
+    circles[(chasePos+1)%NUM_LEDS].setAttribute('fill',`rgb(${Math.round(cr*140/255)},${Math.round(cg*140/255)},${Math.round(cb*140/255)})`);
+    circles[(chasePos+2)%NUM_LEDS].setAttribute('fill',`rgb(${Math.round(cr*60/255)},${Math.round(cg*60/255)},${Math.round(cb*60/255)})`);
+  } else if(state.effect==='sparkle'){
+    if(ts-sparkleLastTs>40){
+      sparkleLastTs=ts;
+      sparkleLevels=sparkleLevels.map(v=>v*(180/255));
+      sparkleLevels[Math.floor(Math.random()*NUM_LEDS)]=1.0;
+    }
+    circles.forEach((c,i)=>c.setAttribute('fill',`rgb(${Math.round(cr*sparkleLevels[i])},${Math.round(cg*sparkleLevels[i])},${Math.round(cb*sparkleLevels[i])})`));
+  } else if(state.effect==='gaslight'){
+    gasPhase+=Math.PI*2*1.5*dt;
+    const dStart=state.descentStart;
+    const inD=state.gasCycle>=dStart;
+    const inW=!inD&&state.gasCycle===dStart-1;
+    let bMin=inD?state.gasDeepBrightnessMin:state.gasMinBrightness;
+    let bMax=inD?state.gasDeepBrightnessMax:state.gasMaxBrightness;
+    if(inD&&state.gasDescentCycles>1){
+      const p=(state.gasCycle-dStart)/(state.gasDescentCycles-1);
+      bMin=state.gasMinBrightness+(state.gasDeepBrightnessMin-state.gasMinBrightness)*p;
+      bMax=state.gasMaxBrightness+(state.gasDeepBrightnessMax-state.gasMaxBrightness)*p;
+    }
+    let wb=bMin+(0.5+0.5*Math.sin(gasPhase))*(bMax-bMin);
+    if(!gasTxActive&&ts-gasTxCheck>100){
+      gasTxCheck=ts;
+      if(Math.random()*100<(inW?state.gasWarnProbability*3:state.gasWarnProbability)){
+        gasTxActive=true;gasTxStart=ts;gasTxDepth=40+Math.random()*50;
+      }
+    }
+    let fb=wb;
+    if(gasTxActive){const age=ts-gasTxStart;if(age<80)fb=Math.max(5,wb-gasTxDepth);else gasTxActive=false;}
+    fb=Math.max(5,Math.min(255,fb))/255;
+    circles.forEach(c=>{
+      const v=state.gasVariation>0?(Math.random()-0.5)*2*state.gasVariation/255:0;
+      const s=Math.max(0.02,Math.min(1,fb+v));
+      c.setAttribute('fill',`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`);
+    });
+  }
+  ringDotsP.style.opacity=state.power?(0.12+(state.brightness/255)*0.88):'0.08';
+  requestAnimationFrame(animLoop);
+}
+requestAnimationFrame(animLoop);
+async function pollStatus(){
+  try{
+    const r=await fetch('/getStatus',{signal:AbortSignal.timeout(2000)});
+    const d=await r.json();
+    state.power=d.power;state.effect=d.effect;state.brightness=d.brightness;state.color=d.color;
+    state.gasCycle=d.cycle;state.gasTotalCycles=d.totalCycles;
+    state.gasMinBrightness=d.minBrightness;state.gasMaxBrightness=d.maxBrightness;
+    state.gasDeepBrightnessMin=d.deepBrightnessMin;state.gasDeepBrightnessMax=d.deepBrightnessMax;
+    state.gasDescentCycles=d.descentCycles;state.gasVariation=d.variation;
+    state.gasWarnProbability=d.warnProbability;state.descentStart=d.descentStart;
+    const dStart=d.descentStart;
+    const inD=d.cycle>=dStart;
+    const inW=!inD&&d.cycle===dStart-1;
+    document.getElementById('effectLabelP').textContent=EFFECT_NAMES[d.effect]||d.effect;
+    document.getElementById('phaseBadgeP').textContent=inD?'DESCENT PHASE':inW?'PRE-DESCENT':d.running?'VIGIL ACTIVE':'PAUSED';
+    document.getElementById('ringSvgP').style.filter=d.power?`drop-shadow(0 0 14px ${d.color}99)`:'none';
+    document.getElementById('statusDotP').className='status-dot online';
+    document.getElementById('statusTxtP').textContent='FIELD UNIT RESPONDING \u2014 ESP-32';
+  }catch{
+    document.getElementById('statusDotP').className='status-dot';
+    document.getElementById('statusTxtP').textContent='SIGNAL LOST';
+  }
+}
+setInterval(pollStatus,1000);
+pollStatus();
+</script>
+</body>
+</html>
+)===";
 
 const char HTML_PAGE[] PROGMEM = R"===(
 <!DOCTYPE html>
@@ -677,51 +892,51 @@ input[type="range"]::-webkit-slider-thumb:hover {
       </div>
 
       <div class="gas-row">
-        <label for="gasTotalCycles">Cycles Before Descent</label>
+        <label for="gasTotalCycles">Total Cycles</label>
         <input type="number" id="gasTotalCycles" min="1" max="99" value="7">
         <span class="gas-unit">count</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasMinBrightness">Normal Min Brightness</label>
+        <label for="gasDescentCycles">Descent Cycles</label>
+        <input type="number" id="gasDescentCycles" min="1" max="99" value="2">
+        <span class="gas-unit">count</span>
+      </div>
+
+      <div class="gas-row">
+        <label for="gasMinBrightness">Normal Min</label>
         <input type="number" id="gasMinBrightness" min="0" max="255" value="190">
         <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasMaxBrightness">Normal Max Brightness</label>
+        <label for="gasMaxBrightness">Normal Max</label>
         <input type="number" id="gasMaxBrightness" min="0" max="255" value="255">
         <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasDeepBrightness">Descent Brightness</label>
-        <input type="number" id="gasDeepBrightness" min="0" max="255" value="15">
+        <label for="gasDeepBrightnessMin">Descent Min</label>
+        <input type="number" id="gasDeepBrightnessMin" min="0" max="255" value="5">
         <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasNormalDelayMin">Normal Delay Min</label>
-        <input type="number" id="gasNormalDelayMin" min="1" max="5000" value="30">
-        <span class="gas-unit">ms</span>
+        <label for="gasDeepBrightnessMax">Descent Max</label>
+        <input type="number" id="gasDeepBrightnessMax" min="0" max="255" value="25">
+        <span class="gas-unit">0–255</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasNormalDelayMax">Normal Delay Max</label>
-        <input type="number" id="gasNormalDelayMax" min="1" max="5000" value="120">
-        <span class="gas-unit">ms</span>
+        <label for="gasVariation">Per-LED Variation</label>
+        <input type="number" id="gasVariation" min="0" max="50" value="15">
+        <span class="gas-unit">0–50</span>
       </div>
 
       <div class="gas-row">
-        <label for="gasDeepDelayMin">Descent Delay Min</label>
-        <input type="number" id="gasDeepDelayMin" min="1" max="5000" value="100">
-        <span class="gas-unit">ms</span>
-      </div>
-
-      <div class="gas-row">
-        <label for="gasDeepDelayMax">Descent Delay Max</label>
-        <input type="number" id="gasDeepDelayMax" min="1" max="5000" value="400">
-        <span class="gas-unit">ms</span>
+        <label for="gasWarnProbability">Warning Chance</label>
+        <input type="number" id="gasWarnProbability" min="0" max="100" value="10">
+        <span class="gas-unit">%/100ms</span>
       </div>
     </div>
 
@@ -786,7 +1001,6 @@ input[type="range"]::-webkit-slider-thumb:hover {
     c.setAttribute('cy', y.toFixed(2));
     c.setAttribute('r', DOT_R);
     c.setAttribute('fill', '#4a8c3a');
-    c.style.transition = 'fill 0.4s, opacity 0.4s';
     ringDots.appendChild(c);
     circles.push(c);
   }
@@ -821,17 +1035,111 @@ input[type="range"]::-webkit-slider-thumb:hover {
     effect: 'solid',
     gasTargetSeconds: 777,
     gasTotalCycles: 7,
+    gasDescentCycles: 2,
     gasMinBrightness: 190,
     gasMaxBrightness: 255,
-    gasDeepBrightness: 15,
-    gasNormalDelayMin: 30,
-    gasNormalDelayMax: 120,
-    gasDeepDelayMin: 100,
-    gasDeepDelayMax: 400,
+    gasDeepBrightnessMin: 5,
+    gasDeepBrightnessMax: 25,
+    gasVariation: 15,
+    gasWarnProbability: 10,
     gasCycle: 1,
     gasElapsed: 0,
-    gasRunning: true
+    gasRunning: true,
+    descentStart: 6
   };
+
+  // ── Animation State ──────────────────────────────────────
+  let animLastTs = 0, pulsePhase = 0, rainbowHueJs = 0;
+  let chasePos = 0, chaseLastTs = 0;
+  let sparkleLastTs = 0, sparkleLevels = new Array(NUM_LEDS).fill(0);
+  let gasPhaseJs = 0, gasTxActive = false, gasTxStart = 0, gasTxDepth = 0, gasTxCheck = 0;
+
+  // ── Animation Loop ───────────────────────────────────────
+  function resetAnimState(effect) {
+    if (effect === 'gaslight') { gasPhaseJs = 0; gasTxActive = false; }
+    if (effect === 'chase')    { chasePos = 0; chaseLastTs = 0; }
+    if (effect === 'sparkle')  { sparkleLevels.fill(0); sparkleLastTs = 0; }
+    if (effect === 'pulse')    { pulsePhase = 0; }
+    if (effect === 'rainbow')  { rainbowHueJs = 0; }
+  }
+
+  function animLoop(ts) {
+    const dt = animLastTs ? Math.min((ts - animLastTs) / 1000, 0.1) : 0.016;
+    animLastTs = ts;
+    const cr = parseInt(state.color.slice(1,3), 16);
+    const cg = parseInt(state.color.slice(3,5), 16);
+    const cb = parseInt(state.color.slice(5,7), 16);
+
+    if (!state.power || state.effect === 'off_effect') {
+      circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
+    } else if (state.effect === 'solid') {
+      circles.forEach(c => c.setAttribute('fill', state.color));
+    } else if (state.effect === 'pulse') {
+      pulsePhase += 0.05;
+      const s = 0.04 + Math.max(0, 0.5 + 0.5 * Math.sin(pulsePhase)) * 0.96;
+      const f = `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`;
+      circles.forEach(c => c.setAttribute('fill', f));
+    } else if (state.effect === 'rainbow') {
+      rainbowHueJs = (rainbowHueJs + 2) % 360;
+      circles.forEach((c, i) => {
+        c.setAttribute('fill', `hsl(${(rainbowHueJs + i*(360/NUM_LEDS))%360},80%,42%)`);
+      });
+    } else if (state.effect === 'chase') {
+      if (ts - chaseLastTs > 60) { chaseLastTs = ts; chasePos = (chasePos + 1) % NUM_LEDS; }
+      circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
+      circles[chasePos].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+      circles[(chasePos+1)%NUM_LEDS].setAttribute('fill',
+        `rgb(${Math.round(cr*140/255)},${Math.round(cg*140/255)},${Math.round(cb*140/255)})`);
+      circles[(chasePos+2)%NUM_LEDS].setAttribute('fill',
+        `rgb(${Math.round(cr*60/255)},${Math.round(cg*60/255)},${Math.round(cb*60/255)})`);
+    } else if (state.effect === 'sparkle') {
+      if (ts - sparkleLastTs > 40) {
+        sparkleLastTs = ts;
+        sparkleLevels = sparkleLevels.map(v => v * (180/255));
+        sparkleLevels[Math.floor(Math.random() * NUM_LEDS)] = 1.0;
+      }
+      circles.forEach((c, i) => {
+        const sl = sparkleLevels[i];
+        c.setAttribute('fill', `rgb(${Math.round(cr*sl)},${Math.round(cg*sl)},${Math.round(cb*sl)})`);
+      });
+    } else if (state.effect === 'gaslight') {
+      gasPhaseJs += Math.PI * 2 * 1.5 * dt;
+      const dStart = state.descentStart;
+      const inD = state.gasCycle >= dStart;
+      const inW = !inD && state.gasCycle === dStart - 1;
+      let bMin = inD ? state.gasDeepBrightnessMin : state.gasMinBrightness;
+      let bMax = inD ? state.gasDeepBrightnessMax : state.gasMaxBrightness;
+      if (inD && state.gasDescentCycles > 1) {
+        const p = (state.gasCycle - dStart) / (state.gasDescentCycles - 1);
+        bMin = state.gasMinBrightness + (state.gasDeepBrightnessMin - state.gasMinBrightness) * p;
+        bMax = state.gasMaxBrightness + (state.gasDeepBrightnessMax - state.gasMaxBrightness) * p;
+      }
+      let wb = bMin + (0.5 + 0.5 * Math.sin(gasPhaseJs)) * (bMax - bMin);
+      if (!gasTxActive && ts - gasTxCheck > 100) {
+        gasTxCheck = ts;
+        if (Math.random() * 100 < (inW ? state.gasWarnProbability * 3 : state.gasWarnProbability)) {
+          gasTxActive = true; gasTxStart = ts; gasTxDepth = 40 + Math.random() * 50;
+        }
+      }
+      let fb = wb;
+      if (gasTxActive) {
+        const age = ts - gasTxStart;
+        if (age < 80) fb = Math.max(5, wb - gasTxDepth);
+        else gasTxActive = false;
+      }
+      fb = Math.max(5, Math.min(255, fb)) / 255;
+      circles.forEach(c => {
+        const v = state.gasVariation > 0 ? (Math.random() - 0.5) * 2 * state.gasVariation / 255 : 0;
+        const s = Math.max(0.02, Math.min(1, fb + v));
+        c.setAttribute('fill', `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`);
+      });
+    }
+
+    ringDots.style.opacity = state.power ? (0.12 + (state.brightness / 255) * 0.88) : '0.08';
+    requestAnimationFrame(animLoop);
+  }
+  requestAnimationFrame(animLoop);
+  // ─────────────────────────────────────────────────────────
 
   let debounceTimer;
 
@@ -847,22 +1155,14 @@ input[type="range"]::-webkit-slider-thumb:hover {
     updateRingColor(hex);
     document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
     if (swatchEl) swatchEl.classList.add('active');
-    document.querySelector('.ring-svg').style.filter = `drop-shadow(0 0 12px ${hex}99)`;
     sendDebounced();
   }
 
   function updateRingColor(hex) {
-    circles.forEach((c, i) => {
-      if (!state.power || state.effect === 'off_effect') {
-        c.setAttribute('fill','#2a1a08');
-        return;
-      }
-      if (state.effect === 'rainbow') {
-        c.setAttribute('fill', `hsl(${(i/NUM_LEDS)*360},80%,42%)`);
-      } else {
-        c.setAttribute('fill', hex);
-      }
-    });
+    // Circle colours are driven by the animation loop; just update the glow.
+    document.getElementById('ringSvg').style.filter = state.power
+      ? `drop-shadow(0 0 12px ${hex}99)`
+      : 'drop-shadow(0 0 2px rgba(26,18,8,0.4))';
   }
 
   const brightnessSlider = document.getElementById('brightness');
@@ -881,9 +1181,6 @@ input[type="range"]::-webkit-slider-thumb:hover {
     powerLabel.textContent = state.power ? 'ACTIVE' : 'DORMANT';
     powerLabel.className = 'pstate' + (state.power ? '' : ' off');
     updateRingColor(state.color);
-    document.querySelector('.ring-svg').style.filter = state.power
-      ? `drop-shadow(0 0 12px ${state.color}99)`
-      : 'drop-shadow(0 0 2px rgba(26,18,8,0.4))';
     sendCommand('/power', { state: state.power ? 1 : 0 });
   });
 
@@ -892,7 +1189,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
       document.querySelectorAll('.effect-btn[data-effect]').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       state.effect = btn.dataset.effect;
-      updateRingColor(state.color);
+      resetAnimState(state.effect);
       sendCommand('/effect', { effect: state.effect });
     });
   });
@@ -950,28 +1247,38 @@ input[type="range"]::-webkit-slider-thumb:hover {
     }
   }
 
+  // Only update an input if the user isn't currently editing it
+  function safeSetInput(id, val) {
+    const el = document.getElementById(id);
+    if (el && document.activeElement !== el) el.value = val;
+  }
+
   async function pollStatus() {
     try {
       const r = await fetch('/getStatus', { signal: AbortSignal.timeout(2000) });
       const data = await r.json();
 
-      state.power = data.power;
-      state.effect = data.effect;
+      const prevEffect = state.effect;
+      state.power      = data.power;
+      state.effect     = data.effect;
       state.brightness = data.brightness;
-      state.color = data.color;
-      state.gasCycle = data.cycle;
+      state.color      = data.color;
+      state.gasCycle   = data.cycle;
       state.gasElapsed = data.elapsed;
       state.gasRunning = data.running;
+      state.descentStart = data.descentStart;
 
-      state.gasTargetSeconds = data.targetSeconds;
-      state.gasTotalCycles = data.totalCycles;
-      state.gasMinBrightness = data.minBrightness;
-      state.gasMaxBrightness = data.maxBrightness;
-      state.gasDeepBrightness = data.deepBrightness;
-      state.gasNormalDelayMin = data.normalDelayMin;
-      state.gasNormalDelayMax = data.normalDelayMax;
-      state.gasDeepDelayMin = data.deepDelayMin;
-      state.gasDeepDelayMax = data.deepDelayMax;
+      state.gasTargetSeconds    = data.targetSeconds;
+      state.gasTotalCycles      = data.totalCycles;
+      state.gasDescentCycles    = data.descentCycles;
+      state.gasMinBrightness    = data.minBrightness;
+      state.gasMaxBrightness    = data.maxBrightness;
+      state.gasDeepBrightnessMin = data.deepBrightnessMin;
+      state.gasDeepBrightnessMax = data.deepBrightnessMax;
+      state.gasVariation        = data.variation;
+      state.gasWarnProbability  = data.warnProbability;
+
+      if (prevEffect !== state.effect) resetAnimState(state.effect);
 
       powerToggle.checked = state.power;
       powerLabel.textContent = state.power ? 'ACTIVE' : 'DORMANT';
@@ -981,24 +1288,27 @@ input[type="range"]::-webkit-slider-thumb:hover {
       hexDisplay.textContent = '[ ' + state.color.replace('#','').toUpperCase() + ' ]';
       brightnessSlider.value = state.brightness;
       brightnessVal.textContent = state.brightness;
-      ringDots.style.opacity = 0.12 + (state.brightness / 255) * 0.88;
 
-      document.getElementById('gasTargetSeconds').value = state.gasTargetSeconds;
-      document.getElementById('gasTotalCycles').value = state.gasTotalCycles;
-      document.getElementById('gasMinBrightness').value = state.gasMinBrightness;
-      document.getElementById('gasMaxBrightness').value = state.gasMaxBrightness;
-      document.getElementById('gasDeepBrightness').value = state.gasDeepBrightness;
-      document.getElementById('gasNormalDelayMin').value = state.gasNormalDelayMin;
-      document.getElementById('gasNormalDelayMax').value = state.gasNormalDelayMax;
-      document.getElementById('gasDeepDelayMin').value = state.gasDeepDelayMin;
-      document.getElementById('gasDeepDelayMax').value = state.gasDeepDelayMax;
+      safeSetInput('gasTargetSeconds',    state.gasTargetSeconds);
+      safeSetInput('gasTotalCycles',      state.gasTotalCycles);
+      safeSetInput('gasDescentCycles',    state.gasDescentCycles);
+      safeSetInput('gasMinBrightness',    state.gasMinBrightness);
+      safeSetInput('gasMaxBrightness',    state.gasMaxBrightness);
+      safeSetInput('gasDeepBrightnessMin', state.gasDeepBrightnessMin);
+      safeSetInput('gasDeepBrightnessMax', state.gasDeepBrightnessMax);
+      safeSetInput('gasVariation',        state.gasVariation);
+      safeSetInput('gasWarnProbability',  state.gasWarnProbability);
+
+      const inDescent = state.gasCycle >= state.descentStart;
+      const inWarning = !inDescent && state.gasCycle === state.descentStart - 1;
+      const phaseLabel = inDescent ? 'DESCENT' : inWarning ? 'WARNING' : 'NORMAL';
 
       document.getElementById('gasCycleReadout').textContent =
         `${state.gasCycle} / ${state.gasTotalCycles}`;
       document.getElementById('gasElapsedReadout').textContent =
         `${state.gasElapsed} / ${state.gasTargetSeconds}s`;
       document.getElementById('gasStateReadout').textContent =
-        state.gasRunning ? 'ACTIVE' : 'PAUSED';
+        state.gasRunning ? phaseLabel : 'PAUSED';
 
       document.querySelectorAll('.effect-btn[data-effect]').forEach(b => {
         b.classList.toggle('active', b.dataset.effect === state.effect);
@@ -1009,29 +1319,51 @@ input[type="range"]::-webkit-slider-thumb:hover {
       });
 
       updateRingColor(state.color);
-      document.querySelector('.ring-svg').style.filter = state.power
-        ? `drop-shadow(0 0 12px ${state.color}99)`
-        : 'drop-shadow(0 0 2px rgba(26,18,8,0.4))';
-
       setStatus(true);
     } catch {
       setStatus(false);
     }
   }
 
+  const GAS_PARAM_PAIRS = {
+    gasMinBrightness:    'gasMaxBrightness',
+    gasDeepBrightnessMin:'gasDeepBrightnessMax'
+  };
+
   [
     'gasTargetSeconds',
     'gasTotalCycles',
+    'gasDescentCycles',
     'gasMinBrightness',
     'gasMaxBrightness',
-    'gasDeepBrightness',
-    'gasNormalDelayMin',
-    'gasNormalDelayMax',
-    'gasDeepDelayMin',
-    'gasDeepDelayMax'
+    'gasDeepBrightnessMin',
+    'gasDeepBrightnessMax',
+    'gasVariation',
+    'gasWarnProbability'
   ].forEach(id => {
-    document.getElementById(id).addEventListener('change', e => {
+    const el = document.getElementById(id);
+    el.addEventListener('change', e => {
+      // Validate min < max pairs
+      const pairId = GAS_PARAM_PAIRS[id];
+      if (pairId) {
+        const pairEl = document.getElementById(pairId);
+        if (pairEl && parseInt(e.target.value) > parseInt(pairEl.value)) {
+          e.target.style.outline = '2px solid #8b1a1a';
+          return; // don't send invalid value
+        }
+      }
+      e.target.style.outline = '';
       setParam(id, e.target.value);
+    });
+    el.addEventListener('input', e => {
+      // Clear error highlight as soon as user corrects it
+      const pairId = GAS_PARAM_PAIRS[id];
+      if (pairId) {
+        const pairEl = document.getElementById(pairId);
+        if (pairEl && parseInt(e.target.value) <= parseInt(pairEl.value)) {
+          e.target.style.outline = '';
+        }
+      }
     });
   });
 
@@ -1084,19 +1416,72 @@ void runGaslightEffect() {
   updateGaslightCycle();
 
   unsigned long now = millis();
-  if (now < gasNextFlickerAt) return;
 
-  fill_solid(leds, NUM_LEDS, currentColor);
+  // Rate-limit to ~60 fps
+  if (now - gasLastWaveMs < 16) return;
 
-  if (gasCycleCounter == gasTotalCycles) {
-    FastLED.setBrightness(gasDeepBrightness);
-    FastLED.show();
-    gasNextFlickerAt = now + safeRandomRange(gasDeepDelayMin, gasDeepDelayMax);
+  // Time-based wave phase (~1.5 Hz)
+  float dt = (gasLastWaveMs == 0)
+    ? 0.016f
+    : min((now - gasLastWaveMs) / 1000.0f, 0.1f);
+  gasLastWaveMs = now;
+  gasWavePhase += TWO_PI * 1.5f * dt;
+  if (gasWavePhase > TWO_PI * 100.0f) gasWavePhase -= TWO_PI * 100.0f;
+
+  // Determine which descent phase we are in
+  int descentStart = max(1, gasTotalCycles - gasDescentCycles + 1);
+  bool inDescent   = (gasCycleCounter >= descentStart);
+  bool inWarning   = !inDescent && (gasCycleCounter == descentStart - 1);
+
+  // Brightness range for current cycle position
+  int bMin, bMax;
+  if (inDescent) {
+    float p = (gasDescentCycles > 1)
+      ? (float)(gasCycleCounter - descentStart) / (float)(gasDescentCycles - 1)
+      : 1.0f;
+    bMin = (int)(gasMinBrightness + (gasDeepBrightnessMin - gasMinBrightness) * p);
+    bMax = (int)(gasMaxBrightness + (gasDeepBrightnessMax - gasMaxBrightness) * p);
   } else {
-    FastLED.setBrightness(safeRandomRange(gasMinBrightness, gasMaxBrightness));
-    FastLED.show();
-    gasNextFlickerAt = now + safeRandomRange(gasNormalDelayMin, gasNormalDelayMax);
+    bMin = gasMinBrightness;
+    bMax = gasMaxBrightness;
   }
+
+  // Slow sine-wave base (simulates gas pressure rise/fall)
+  float sineVal  = 0.5f + 0.5f * sinf(gasWavePhase);
+  int   waveBright = bMin + (int)(sineVal * (float)(bMax - bMin));
+
+  // Occasional transient dip (pressure spike / turbulence)
+  if (!gasTransientActive && (now - gasLastTransientCheck > 100)) {
+    gasLastTransientCheck = now;
+    int prob = inWarning ? gasWarnProbability * 3 : gasWarnProbability;
+    if ((int)random(100) < prob) {
+      gasTransientActive = true;
+      gasTransientStart  = now;
+      gasTransientDepth  = (int)random(40, 90);
+    }
+  }
+
+  int finalBright = waveBright;
+  if (gasTransientActive) {
+    unsigned long age = now - gasTransientStart;
+    if (age < 80UL) {
+      finalBright = max(5, waveBright - gasTransientDepth);
+    } else {
+      gasTransientActive = false;
+    }
+  }
+  finalBright = constrain(finalBright, 5, 255);
+
+  // Render with per-LED variation
+  FastLED.setBrightness(brightness);
+  for (int i = 0; i < NUM_LEDS; i++) {
+    leds[i] = currentColor;
+    int var = (gasVariation > 0)
+      ? (int)random(0, gasVariation * 2 + 1) - gasVariation
+      : 0;
+    leds[i].nscale8((uint8_t)constrain(finalBright + var, 5, 255));
+  }
+  FastLED.show();
 }
 
 // ── Effects ───────────────────────────────────────────────
@@ -1171,6 +1556,10 @@ void applyEffect() {
 }
 
 // ── Handlers ──────────────────────────────────────────────
+void handlePlayer() {
+  server.send_P(200, "text/html", PLAYER_PAGE);
+}
+
 void handleRoot() {
   server.send_P(200, "text/html", HTML_PAGE);
 }
@@ -1221,7 +1610,6 @@ void handleEffect() {
   if (server.hasArg("effect")) {
     currentEffect = server.arg("effect");
     lastUpdate = 0;
-    gasNextFlickerAt = 0;
 
     if (currentEffect == "solid") {
       fill_solid(leds, NUM_LEDS, currentColor);
@@ -1231,8 +1619,10 @@ void handleEffect() {
       fill_solid(leds, NUM_LEDS, CRGB::Black);
       FastLED.show();
     } else if (currentEffect == "gaslight") {
-      gasCycleStart = millis();
-      gasNextFlickerAt = 0;
+      gasCycleStart      = millis();
+      gasWavePhase       = 0.0f;
+      gasLastWaveMs      = 0;
+      gasTransientActive = false;
     }
   }
 
@@ -1248,15 +1638,15 @@ void handleSetParam() {
   String name = server.arg("name");
   int value = server.arg("value").toInt();
 
-  if      (name == "gasTargetSeconds")  gasTargetSeconds  = max(1, value);
-  else if (name == "gasTotalCycles")    gasTotalCycles    = max(1, value);
-  else if (name == "gasMinBrightness")  gasMinBrightness  = constrain(value, 0, 255);
-  else if (name == "gasMaxBrightness")  gasMaxBrightness  = constrain(value, 0, 255);
-  else if (name == "gasDeepBrightness") gasDeepBrightness = constrain(value, 0, 255);
-  else if (name == "gasNormalDelayMin") gasNormalDelayMin = max(1, value);
-  else if (name == "gasNormalDelayMax") gasNormalDelayMax = max(1, value);
-  else if (name == "gasDeepDelayMin")   gasDeepDelayMin   = max(1, value);
-  else if (name == "gasDeepDelayMax")   gasDeepDelayMax   = max(1, value);
+  if      (name == "gasTargetSeconds")     gasTargetSeconds     = max(1, value);
+  else if (name == "gasTotalCycles")       gasTotalCycles       = max(1, value);
+  else if (name == "gasDescentCycles")     gasDescentCycles     = constrain(value, 1, gasTotalCycles);
+  else if (name == "gasMinBrightness")     gasMinBrightness     = constrain(value, 0, 255);
+  else if (name == "gasMaxBrightness")     gasMaxBrightness     = constrain(value, 0, 255);
+  else if (name == "gasDeepBrightnessMin") gasDeepBrightnessMin = constrain(value, 0, 255);
+  else if (name == "gasDeepBrightnessMax") gasDeepBrightnessMax = constrain(value, 0, 255);
+  else if (name == "gasVariation")         gasVariation         = constrain(value, 0, 50);
+  else if (name == "gasWarnProbability")   gasWarnProbability   = constrain(value, 0, 100);
   else {
     server.send(400, "text/plain", "Unknown param");
     return;
@@ -1275,15 +1665,16 @@ void handleGasControl() {
 
   if (action == "start") {
     gasCycleRunning = true;
-    gasCycleStart = millis();
-    gasNextFlickerAt = 0;
+    gasCycleStart   = millis();
   } else if (action == "pause") {
     gasCycleRunning = false;
   } else if (action == "reset") {
-    gasCycleCounter = 1;
-    gasCycleRunning = true;
-    gasCycleStart = millis();
-    gasNextFlickerAt = 0;
+    gasCycleCounter    = 1;
+    gasCycleRunning    = true;
+    gasCycleStart      = millis();
+    gasWavePhase       = 0.0f;
+    gasLastWaveMs      = 0;
+    gasTransientActive = false;
   }
 
   server.send(200, "text/plain", action);
@@ -1302,13 +1693,14 @@ void handleGetStatus() {
   json += "\"elapsed\":" + String(elapsed) + ",";
   json += "\"targetSeconds\":" + String(gasTargetSeconds) + ",";
   json += "\"running\":" + String(gasCycleRunning ? "true" : "false") + ",";
-  json += "\"minBrightness\":" + String(gasMinBrightness) + ",";
-  json += "\"maxBrightness\":" + String(gasMaxBrightness) + ",";
-  json += "\"deepBrightness\":" + String(gasDeepBrightness) + ",";
-  json += "\"normalDelayMin\":" + String(gasNormalDelayMin) + ",";
-  json += "\"normalDelayMax\":" + String(gasNormalDelayMax) + ",";
-  json += "\"deepDelayMin\":" + String(gasDeepDelayMin) + ",";
-  json += "\"deepDelayMax\":" + String(gasDeepDelayMax);
+  json += "\"minBrightness\":"     + String(gasMinBrightness)     + ",";
+  json += "\"maxBrightness\":"     + String(gasMaxBrightness)     + ",";
+  json += "\"deepBrightnessMin\":" + String(gasDeepBrightnessMin) + ",";
+  json += "\"deepBrightnessMax\":" + String(gasDeepBrightnessMax) + ",";
+  json += "\"descentCycles\":"     + String(gasDescentCycles)     + ",";
+  json += "\"variation\":"         + String(gasVariation)         + ",";
+  json += "\"warnProbability\":"   + String(gasWarnProbability)   + ",";
+  json += "\"descentStart\":"      + String(max(1, gasTotalCycles - gasDescentCycles + 1));
   json += "}";
 
   server.send(200, "application/json", json);
@@ -1347,6 +1739,7 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   server.on("/",          handleRoot);
+  server.on("/player",    handlePlayer);
   server.on("/ping",      handlePing);
   server.on("/power",     handlePower);
   server.on("/color",     handleColor);
