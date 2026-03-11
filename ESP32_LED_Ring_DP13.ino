@@ -61,9 +61,10 @@ int  loaderFlashCount = 0;    // number of on→off cycles completed
 bool loaderFlashOn    = false;
 unsigned long loaderFadeStart = 0;
 
-int sealPos        = 1;    // front LED of the 2-LED window (orbits 1..NUM_LEDS-1)
-int sealLed0Bright = 0;    // LED 0 brightness; starts off, +10 per full rotation
-int sealSpeed      = 100;  // ms per step
+int sealPos      = 0;    // current sweep LED position
+int sealStep     = 0;    // steps taken this rotation (0..NUM_LEDS-1)
+int sealRotation = 0;    // completed rotations = number of perm-lit LEDs
+int sealSpeed    = 100;  // ms per step
 
 // ── Trigger State ─────────────────────────────────────────
 CRGB          triggerReturnColor = CRGB(74, 140, 58); // color to restore after trigger expiry
@@ -349,7 +350,7 @@ const ES={
   chase:   {pos:0,lastTs:0,revStep:0,litCount:1},
   sparkle: {lastTs:0,levels:new Array(NUM_LEDS).fill(0)},
   loader:  {base:1,sweep:1,lastTs:0,phase:0,flashCount:0,flashOn:false,fadeStart:0},
-  summon2: {pos:1,led0Bright:0,lastTs:0},
+  summon2: {pos:0,step:0,rot:0,lastTs:0},
   gaslight:{phase:0,txActive:false,txStart:0,txDepth:0,txCheck:0},
 };
 const ES_RESET={
@@ -358,7 +359,7 @@ const ES_RESET={
   chase:   e=>{e.pos=0;e.lastTs=0;e.revStep=0;e.litCount=1;},
   sparkle: e=>{e.lastTs=0;e.levels.fill(0);},
   loader:  e=>{e.base=1;e.sweep=1;e.lastTs=0;e.phase=0;e.flashCount=0;e.flashOn=false;e.fadeStart=0;},
-  summon2: e=>{e.pos=1;e.led0Bright=0;e.lastTs=0;},
+  summon2: e=>{e.pos=0;e.step=0;e.rot=0;e.lastTs=0;},
   gaslight:e=>{e.phase=0;e.txActive=false;},
 };
 const EFFECT_RENDERERS={
@@ -402,10 +403,9 @@ const EFFECT_RENDERERS={
   summon2:(ts,dt,cr,cg,cb,st)=>{
     const e=ES.summon2,N=NUM_LEDS,spd=100;
     circles.forEach(c=>c.setAttribute('fill','#2a1a08'));
-    if(ts-e.lastTs>spd){e.lastTs=ts;e.pos++;if(e.pos>=N){e.pos=1;e.led0Bright=Math.min(255,e.led0Bright+10);}}
-    if(e.led0Bright>0){const s=e.led0Bright/255;circles[0].setAttribute('fill',`rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`); }
+    for(let i=0;i<e.rot&&i<N;i++){const b=Math.min(1,(e.rot-i)*10/255);circles[i].setAttribute('fill',`rgb(${Math.round(cr*b)},${Math.round(cg*b)},${Math.round(cb*b)})`); }
     circles[e.pos].setAttribute('fill',`rgb(${cr},${cg},${cb})`);
-    circles[e.pos%(N-1)+1].setAttribute('fill',`rgb(${cr},${cg},${cb})`);
+    if(ts-e.lastTs>spd){e.lastTs=ts;e.step++;e.pos=(e.pos+1)%N;if(e.step>=N){e.step=0;e.rot++;e.pos=e.rot%N;}}
   },
   gaslight:(ts,dt,cr,cg,cb,st)=>{
     const e=ES.gaslight;e.phase+=Math.PI*2*1.5*dt;
@@ -1401,7 +1401,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     chase:    { pos: 0, lastTs: 0, revStep: 0, litCount: 1 },
     sparkle:  { lastTs: 0, levels: new Array(NUM_LEDS).fill(0) },
     loader:   { base: 1, sweep: 1, lastTs: 0, phase: 0, flashCount: 0, flashOn: false, fadeStart: 0 },
-    summon2:  { pos: 1, led0Bright: 0, lastTs: 0 },
+    summon2:  { pos: 0, step: 0, rot: 0, lastTs: 0 },
     gaslight: { phase: 0, txActive: false, txStart: 0, txDepth: 0, txCheck: 0 },
   };
   const ES_RESET = {
@@ -1410,7 +1410,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
     chase:    e => { e.pos = 0; e.lastTs = 0; e.revStep = 0; e.litCount = 1; },
     sparkle:  e => { e.lastTs = 0; e.levels.fill(0); },
     loader:   e => { e.base = 1; e.sweep = 1; e.lastTs = 0; e.phase = 0; e.flashCount = 0; e.flashOn = false; e.fadeStart = 0; },
-    summon2:  e => { e.pos = 1; e.led0Bright = 0; e.lastTs = 0; },
+    summon2:  e => { e.pos = 0; e.step = 0; e.rot = 0; e.lastTs = 0; },
     gaslight: e => { e.phase = 0; e.txActive = false; },
   };
   const EFFECT_RENDERERS = {
@@ -1461,17 +1461,16 @@ input[type="range"]::-webkit-slider-thumb:hover {
     summon2: (ts, dt, cr, cg, cb) => {
       const e = ES.summon2, N = NUM_LEDS, spd = 100;
       circles.forEach(c => c.setAttribute('fill', '#2a1a08'));
-      if (ts - e.lastTs > spd) {
-        e.lastTs = ts;
-        e.pos++;
-        if (e.pos >= N) { e.pos = 1; e.led0Bright = Math.min(255, e.led0Bright + 10); }
-      }
-      if (e.led0Bright > 0) {
-        const s = e.led0Bright / 255;
-        circles[0].setAttribute('fill', `rgb(${Math.round(cr*s)},${Math.round(cg*s)},${Math.round(cb*s)})`);
+      for (let i = 0; i < e.rot && i < N; i++) {
+        const b = Math.min(1, (e.rot - i) * 10 / 255);
+        circles[i].setAttribute('fill', `rgb(${Math.round(cr*b)},${Math.round(cg*b)},${Math.round(cb*b)})`);
       }
       circles[e.pos].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
-      circles[e.pos % (N - 1) + 1].setAttribute('fill', `rgb(${cr},${cg},${cb})`);
+      if (ts - e.lastTs > spd) {
+        e.lastTs = ts;
+        e.step++; e.pos = (e.pos + 1) % N;
+        if (e.step >= N) { e.step = 0; e.rot++; e.pos = e.rot % N; }
+      }
     },
     gaslight: (ts, dt, cr, cg, cb) => {
       const e = ES.gaslight; e.phase += Math.PI * 2 * 1.5 * dt;
@@ -2205,9 +2204,13 @@ void renderGaslight() { runGaslightEffect(); }
 void activateOff() { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
 void renderOff()   { fill_solid(leds, NUM_LEDS, CRGB::Black); FastLED.show(); }
 
-// ── Summoning Seal II — 2-LED sliding window ──────────────
+// ── Summoning Seal II ─────────────────────────────────────
+// Single LED sweeps the ring. After each full rotation, the LED
+// that started that rotation stays permanently lit (dim), and each
+// subsequent rotation brightens it by 10. New perm-lit LEDs start
+// at 10/255 and grow each lap. Sweep always starts one ahead.
 void activateSummon2() {
-  sealPos = 1; sealLed0Bright = 0;
+  sealPos = 0; sealStep = 0; sealRotation = 0;
   lastUpdate = 0;
 }
 void renderSummon2() {
@@ -2215,25 +2218,28 @@ void renderSummon2() {
   if (now - lastUpdate < (unsigned long)sealSpeed) return;
   lastUpdate = now;
   fill_solid(leds, NUM_LEDS, CRGB::Black);
-  // LED 0: off at first, brightens by 10 each full rotation
-  if (sealLed0Bright > 0) {
-    leds[0] = CRGB(
-      scale8(currentColor.r, (uint8_t)sealLed0Bright),
-      scale8(currentColor.g, (uint8_t)sealLed0Bright),
-      scale8(currentColor.b, (uint8_t)sealLed0Bright)
+  // Permanently lit LEDs 0..sealRotation-1, brightness = (sealRotation-i)*10
+  for (int i = 0; i < sealRotation && i < NUM_LEDS; i++) {
+    int b = (sealRotation - i) * 10;
+    if (b > 255) b = 255;
+    leds[i] = CRGB(
+      scale8(currentColor.r, (uint8_t)b),
+      scale8(currentColor.g, (uint8_t)b),
+      scale8(currentColor.b, (uint8_t)b)
     );
   }
-  // 2-LED window orbits LEDs 1..NUM_LEDS-1 (skips LED 0)
+  // Sweep LED at full brightness (overwrites any perm LED it lands on)
   leds[sealPos] = currentColor;
-  leds[sealPos % (NUM_LEDS - 1) + 1] = currentColor;
-  // Advance; on wrap increment LED 0 brightness
-  sealPos++;
-  if (sealPos >= NUM_LEDS) {
-    sealPos = 1;
-    sealLed0Bright = min(255, sealLed0Bright + 10);
-  }
   FastLED.setBrightness(brightness);
   FastLED.show();
+  // Advance
+  sealStep++;
+  sealPos = (sealPos + 1) % NUM_LEDS;
+  if (sealStep >= NUM_LEDS) {
+    sealStep = 0;
+    sealRotation++;
+    sealPos = sealRotation % NUM_LEDS;
+  }
 }
 
 // ── Effect registry ───────────────────────────────────────
